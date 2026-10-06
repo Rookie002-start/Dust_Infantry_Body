@@ -1,0 +1,7 @@
+config ALG_LQR_ESO
+    bool "Single-axis LQR + ESO controller"
+    default n
+    help
+      单轴 LQR + 三阶 ESO 力矩控制器（前馈 + LQR 反馈 + 扰动补偿 +
+      偏置补偿 + 死区/软硬限幅/斜率限制），用于云台 yaw/pitch 力矩直驱。
+      参考南京理工大学《单轴云台最优控制器设计》方案，见 algorithm/lqr_eso/。
