@@ -5,21 +5,6 @@
  *        - 8 个分片帧（0x100 ~ 0x107）在回调里按固定偏移拼进聚合帧缓冲
  *        - 线程按发送周期读一份一致快照 → 解析 + 超时判定 → 发布 zbus
  *
- * 本组件只负责"收"：user-can2 总线由发送侧（thread/mcu_inter）持有并完成
- * Init + 设置收帧分发入口，这里只注册 CAN_RX_HANDLER。
- *
- * ⚠️ 拆帧语义：**分片之间不做跨片一致性保证**。同一聚合帧的分片在同一次发送
- *    循环里先后到达；若某片丢失，该片对应的字节段沿用上一周期的值（最多混一个
- *    周期），下个周期自动补齐。对周期性状态广播可接受。
- *
- * 消费者用法（底盘 / 云台线程，各自 1kHz 循环内）：
- * @code
- *   static topic::from_head::Message head{};
- *   if (zbus_chan_read(&pub_from_head, &head, K_NO_WAIT) != 0) {
- *       // 读失败（生产者持锁）→ 沿用上一轮值，不要清零
- *   }
- *   if (!head.online) { 安全降级（底盘停车） } else { 用 head.comm.chassis_vx ... }
- * @endcode
  *
  * @version 0.6
  * @date 2026-09-15

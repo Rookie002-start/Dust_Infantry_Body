@@ -5,9 +5,6 @@
  * @version 0.2
  * @date 2026-09-16
  *
- * 只被 thread/gimbal/trd_gimbal.cpp 使用：这里只放"实例与常量"。
- * CAN_RX_HANDLER 注册放在 .cpp —— 放在头文件里一旦被多处包含，
- * 会在 .can_rx3 段里重复登记同一个 ID，而且成员函数指针不能做段初值。
  *
  * @copyright Copyright (c) 2026
  */
