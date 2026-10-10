@@ -137,12 +137,17 @@ namespace thread::mcu_inter
         }
     }
 
+    /**
+     * @brief 下板 → 上板发送主循环（周期 kPeriodMs，绝对截止时刻计时）
+     *
+     */
     static void Task(void*, void*, void*)
     {
+        const int64_t period = k_ms_to_ticks_ceil64(kPeriodMs);
+        int64_t deadline = k_uptime_ticks() + period;   // 下一个周期的绝对截止 tick
+
         for (;;)
         {
-            const int64_t tick_start = k_uptime_get();
-
             // 1) 拉取通道来源的分片
             RefreshFromChannels();
 
@@ -160,11 +165,13 @@ namespace thread::mcu_inter
                 SendFrame(buf, len);
             }
 
-            const int64_t elapsed = k_uptime_get() - tick_start;
-            const int64_t remain  = static_cast<int64_t>(kPeriodMs) - elapsed;
-            if (remain > 0) {
-                k_msleep(remain);
+            // 睡到绝对截止时刻；本拍已经过点（循环体 > period）就直接重排基准，不往后欠债
+            if (k_uptime_ticks() < deadline) {
+                k_sleep(K_TIMEOUT_ABS_TICKS(deadline));
+            } else {
+                deadline = k_uptime_ticks();
             }
+            deadline += period;
         }
     }
 

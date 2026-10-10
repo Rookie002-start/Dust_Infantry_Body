@@ -166,16 +166,16 @@ static_assert(kTorqueLimit <= kMotorTmax, "inner-loop torque limit exceeds motor
 static constexpr float kMaxOmegaRef = kMotorVmax / kJointRatio;   // = 3.0 rad/s（关节侧）
 
 // ==================== PID 初值（yaw / pitch 各自一套，手动整定） ====================
-//pitch encoder反馈:out_kp = 12.0f out_ki = 0.0f in_kp = 1.5f in_ki = 0.3f
+//pitch encoder反馈:out_kp = 12.0f out_ki = 0.0f in_kp = 2.0f in_ki = 2.5f
 
 static constexpr float kYawPosKp     = 8.0f;
 static constexpr float kYawPosKi     = 0.0f;
-static constexpr float kYawOmegaKp   = 1.2f;
-static constexpr float kYawOmegaKi   = 0.0f;
+static constexpr float kYawOmegaKp   = 1.5f;
+static constexpr float kYawOmegaKi   = 2.5f;
 static constexpr float kPitchPosKp   = 12.0f;
 static constexpr float kPitchPosKi   = 0.0f;
-static constexpr float kPitchOmegaKp = 1.5f;
-static constexpr float kPitchOmegaKi = 0.3f;
+static constexpr float kPitchOmegaKp = 2.0f;
+static constexpr float kPitchOmegaKi = 2.5f;
 
 // ==================== 角速度环反馈低通（alg::filter::LowPassFilter）====================
 // 角速度环的反馈（IMU 陀螺 / 电机编码器）都有高频噪声，直接进环会被 kp 放大成抖动、
@@ -197,14 +197,11 @@ static constexpr int8_t kPitchImuSign   = +1;
 // 一个轴的两个环各自选源，但必须满足上面的"参考系约束"：
 //   · 内环取 IMU 陀螺（世界系角速度）时，外环也必须是世界系（IMU 绝对角）；
 //   · 外环世界系 + 内环关节系（编码器）时，必须开底盘角速度前馈把给定折过来。
-// 实测结论（2026-09-29 台架）：
-//   · yaw   陀螺 z 零延迟、与电机速度反馈残差 3%（且比电机速度反馈更干净）→ 两环都用 IMU；
-//   · pitch 陀螺链路脏（逐毫秒跳变 30~340 deg/s，超出 4N·m/J 能给的加速度）→ 两环都用编码器。
 enum class FbSource : uint8_t { Encoder, Imu };
 
 static constexpr FbSource kYawPosFb    = FbSource::Imu;      // yaw 外环：世界系绝对航向
 static constexpr FbSource kYawRateFb   = FbSource::Imu;      // yaw 内环：世界系陀螺 z
-static constexpr FbSource kPitchPosFb  = FbSource::Encoder;  // pitch 外环：关节角
+static constexpr FbSource kPitchPosFb  = FbSource::Imu;      // pitch 外环：关节角
 static constexpr FbSource kPitchRateFb = FbSource::Encoder;  // pitch 内环：关节角速度
 
 /// 反馈源名字（启动日志用）
@@ -302,16 +299,22 @@ struct Feedback {
     bool  valid = false;
 };
 
+// #define CONFIG_WAVE_TEST 1
+
+// 测试波形选择：整定 PID 用阶跃(Step)，看跟随/频响用正弦(Sine)。改这一行切换。
+enum class TestWave : uint8_t { Sine, Step };
+static constexpr TestWave kTestWave = TestWave::Step;
+
 // ==================== 扫频：每 5s 换一个频点 ====================
 static constexpr float kSweepFreqs[] = {
     2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f,8.0f, 
-    9.0f, 10.0f, 11.0f, 12.0f, 13.0f, 14.0f,
-    15.0f, 16.0f, 17.0f, 18.0f, 19.0f, 20.0f
+    // 9.0f, 10.0f, 11.0f, 12.0f, 13.0f, 14.0f,
+    // 15.0f, 16.0f, 17.0f, 18.0f, 19.0f, 20.0f
 };
 static constexpr uint32_t kSweepDwellMs = 5000;
 static constexpr float    kSweepAmp     = 0.1f;    // rad，按轴调
 
-static bool     g_sweep_on    = false;   // 触发开关
+static bool     g_sweep_on    = true;   // 触发开关
 static float    g_sweep_phase = 0.0f;    // 连续相位
 static uint32_t g_sweep_t0    = 0;       // 当前频点的开始时刻
 static uint8_t  g_sweep_idx   = 0;
@@ -346,6 +349,63 @@ static float SweepTarget(float base)
     }
 
     return base + kSweepAmp * sinf(g_sweep_phase);
+}
+
+static constexpr float kSinFreqHz = 3.0f;    // 指定频率（Hz），按需修改
+static constexpr float kSinAmp    = 0.2f;    // rad，按轴调
+
+static bool  g_sin_on    = true;   // 触发开关
+static float g_sin_phase = 0.0f;   // 连续相位
+
+/**
+ * @brief 固定频率正弦，每拍调用一次
+ * @return 叠加在 base 上的正弦量（rad）
+ *
+ * 相位在 [0, 2π) 内累加并回绕，长时间运行不会因 float 精度掉相。
+ * 每个控制周期只能调用一次：调用两次会让相位走两步、输出频率翻倍。
+ */
+static float SinTarget(float base)
+{
+    if (!g_sin_on) {
+        return base;
+    }
+
+    g_sin_phase += k2Pi * kSinFreqHz * kDt;
+    if (g_sin_phase >= k2Pi) {
+        g_sin_phase -= k2Pi;
+    }
+
+    return base + kSinAmp * sinf(g_sin_phase);
+}
+
+// ==================== 阶跃给定（整定 PID 用） ====================
+// 方波式阶跃：在 +kStepAmp 与 -kStepAmp 之间每 kStepHalfMs 跳一次。
+// 看 VOFA 的"目标 vs 反馈"两条线就能读上升时间/超调/稳态误差。
+static constexpr float    kStepAmp    = 0.20f;   // rad，阶跃高度（半幅）；pitch 别超软限位
+static constexpr uint32_t kStepHalfMs = 1000;    // 每个电平保持多久（ms），半周期
+
+static bool g_step_on = true;                     // 触发开关
+
+/**
+ * @brief 阶跃（方波）给定，每拍调用一次
+ * @param base 叠加基准
+ * @return base ± kStepAmp
+ *
+ * 用 k_uptime_get_32()（毫秒墙钟）计时，而不是数循环拍数：
+ * 即使某一拍被拖后、或丢了几拍，阶跃沿的时刻也不会漂。
+ * 与 SinTarget 同一约定 —— 每个控制周期只能调用一次。
+ */
+static float StepTarget(float base)
+{
+    if (!g_step_on) {
+        return base;
+    }
+
+    // 第几个半周期；偶数半周期 +A，奇数半周期 -A，如此循环
+    const uint32_t half = k_uptime_get_32() / kStepHalfMs;
+    const float sign = (half & 1u) ? -1.0f : 1.0f;
+
+    return base + sign * kStepAmp;
 }
 
 
@@ -432,7 +492,7 @@ static void ReadCommand()
  */
 static void UpdateTarget()
 {
-#ifndef CONFIG_SIN_TEST
+#ifndef CONFIG_WAVE_TEST
     if(g_auto_aim_cmd)
     {
         g_yaw_target   = g_yaw_cmd + g_auto_aim_yaw_angle;
@@ -444,8 +504,9 @@ static void UpdateTarget()
         g_pitch_target = std::clamp(g_pitch_cmd, kPitchMin, kPitchMax);
     }
 #else
-    g_yaw_target   = SweepTarget(0.0f);
-    g_pitch_target = std::clamp(g_pitch_cmd, kPitchMin, kPitchMax);
+    const float test = (kTestWave == TestWave::Step) ? StepTarget(0.0f) : SinTarget(0.0f);
+    g_yaw_target   = test;                       // yaw 要一起测时放开（无软限位）
+    g_pitch_target = std::clamp(test, kPitchMin, kPitchMax);
 #endif
 }
 
@@ -770,13 +831,13 @@ static void ProcessAxis(Axis &axis, AxisState &st, int8_t sign,
         return;
     }
 
-#ifdef CONFIG_SIN_TEST
+#ifdef CONFIG_WAVE_TEST
     static float now_angle = 0;
     if(align_edge && fb.valid)
     {
         now_angle = fb.ang;
     }
-    target_angle += now_angle;
+    if(yaw_axis)    {target_angle += now_angle;}
 #endif
 
     // 外环：角度 → 角速度给定（物理系）
@@ -790,8 +851,11 @@ static void ProcessAxis(Axis &axis, AxisState &st, int8_t sign,
     }
 
     const float omega_fb = st.omega_lpf.Update(fb.omega);
+
     axis.omega.SetTarget(omega_ref);
+    // axis.omega.SetTarget(target_angle);
     axis.omega.SetNow(omega_fb);
+    // axis.omega.SetNow(fb.omega);
 
     const float torque_phys =
         std::clamp(axis.omega.Calc() + tau_ff, -kTorqueLimit, kTorqueLimit);
@@ -826,15 +890,30 @@ static void PublishAngles(const Feedback &yaw_fb, const Feedback &pitch_fb,
 
 static void VofaPublish(const DmMotor::Snapshot &pitch_snap, const DmMotor::Snapshot &yaw_snap, const Feedback &yaw_fb, const Feedback &pitch_fb)
 {
+    static uint32_t g_div = 0;
+
+    if (++g_div != 10)
+    {
+        return;
+    }
+    g_div = 0;
+
     const float frame[] = {
-        // g_yaw_target * rad_to_deg,
-        // yaw_fb.ang * rad_to_deg,
-        // yaw_fb.omega * rad_to_deg,
-        // yaw_snap.omega * rad_to_deg,
-        g_pitch_target * rad_to_deg,
-        pitch_fb.ang * rad_to_deg,
+        g_yaw_target * rad_to_deg,
+        yaw_fb.ang * rad_to_deg,
+        yaw_fb.omega * rad_to_deg,
+        yaw_.position.GetOut() * rad_to_deg,
+        yaw_snap.omega * rad_to_deg,
+        yaw_snap.torque,
+
+        // g_auto_aim_yaw_angle * rad_to_deg,
+        // g_auto_aim_pitch_angle * rad_to_deg,
+
+        // g_pitch_target * rad_to_deg,
+        // pitch_fb.ang * rad_to_deg,
         pitch_fb.omega * rad_to_deg,
-        pitch_snap.radian * rad_to_deg,
+        // pitch_.position.GetOut() * rad_to_deg,
+        // pitch_snap.radian * rad_to_deg,
         pitch_snap.omega * rad_to_deg,
         // pitch_out_torque
     };
@@ -843,13 +922,40 @@ static void VofaPublish(const DmMotor::Snapshot &pitch_snap, const DmMotor::Snap
 }
 
 /**
- * @brief 云台控制主循环（固定 1ms 周期，tick 计时）
+ * @brief 云台控制主循环（周期 kPeriodMs，绝对截止时刻计时）
+ *
+ * 周期必须靠"绝对截止时刻"维持：睡到 deadline，而不是 k_sleep(period - used)。
+ * 后者里的 used = k_uptime_ticks() - tick_start 是按系统 tick（这里 0.5ms）量化的，
+ * 循环体只要不足半拍就会读到 used = 0、于是多睡整整一拍 ——
+ * 实测 1ms 目标跑成了 1.5ms（664Hz）。绝对截止时刻把 tick 量化误差和循环体
+ * 耗时一起吸收掉，只要循环体 < period，平均周期就恒等于 period。
+ * 循环体超时（> period）时不硬追，重排基准并计数，下条日志能看出来。
  */
 static void Task(void*, void*, void*)
 {
+    const int64_t period = k_ms_to_ticks_ceil64(kPeriodMs);
+    int64_t deadline = k_uptime_ticks() + period;   // 下一个周期的绝对截止 tick
+
     for (;;)
     {
-        const int64_t tick_start = k_uptime_ticks();
+        static uint32_t iters = 0, overruns = 0, body_max = 0, last_ms = 0;
+
+        // 从循环最顶端开始计时：这样 LOG_INF 本身的耗时也会被 body_max 抓到
+        //（日志后端是 UART/IMMEDIATE，写一行是同步阻塞的，见下面的说明）
+        const int64_t body_t0 = k_uptime_ticks();
+
+        ++iters;
+        if (k_uptime_get_32() - last_ms >= 1000u) {
+            last_ms = k_uptime_get_32();
+            // LOG_INF("gimbal loop %u Hz, overrun %u, body_max %u ticks (%u us), vofa_drop %u",
+            //         iters, overruns, body_max,
+            //         static_cast<unsigned>((static_cast<uint64_t>(body_max) * 1000000u) /
+            //                               CONFIG_SYS_CLOCK_TICKS_PER_SEC),
+            //         vofa::DropCount());
+            iters = 0;
+            overruns = 0;
+            body_max = 0;
+        }
 
         ReadCommand();
         UpdateTarget();
@@ -891,11 +997,20 @@ static void Task(void*, void*, void*)
         PublishAngles(yaw_fb, pitch_fb, yaw_relative,
                       (yaw_snap.err == DmErrorStatus::Enable) && !yaw_lost);
 
-        const int64_t period = k_ms_to_ticks_ceil64(kPeriodMs);
-        const int64_t used   = k_uptime_ticks() - tick_start;
-        if (used < period) {
-            k_sleep(K_TICKS(period - used));
+        // 循环体耗时（不含睡觉）：用来区分"体超时"和"被同等优先级线程拖后"
+        const uint32_t body = static_cast<uint32_t>(k_uptime_ticks() - body_t0);
+        if (body > body_max) {
+            body_max = body;
         }
+
+        // 睡到绝对截止时刻；本拍已经过点（循环体 > period）就直接重排基准，不往后欠债
+        if (k_uptime_ticks() < deadline) {
+            k_sleep(K_TIMEOUT_ABS_TICKS(deadline));
+        } else {
+            ++overruns;
+            deadline = k_uptime_ticks();
+        }
+        deadline += period;
     }
 }
 

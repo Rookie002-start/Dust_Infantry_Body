@@ -475,32 +475,40 @@ static void FlushTx()
 }
 
 /**
- * @brief 底盘控制主循环（固定 1ms 周期）
+ * @brief 底盘控制主循环（周期 kPeriodMs）
  *
- * 周期用 tick 计时：1ms = 2 个 tick（CONFIG_SYS_CLOCK_TICKS_PER_SEC=2000），
- * 若用 k_uptime_get()（ms 粒度）算余量，实际周期会退化成 1~2ms 抖动。
+ * 周期靠"绝对截止时刻"维持：睡到 deadline，而不是 k_sleep(period - used)。
+ * 后者的 used = k_uptime_ticks() - tick_start 是按系统 tick 量化的
+ * （CONFIG_SYS_CLOCK_TICKS_PER_SEC=2000 → 1 tick = 0.5ms，1ms = 2 tick），
+ * 循环体不足半拍时会读到 used=0 而多睡一整拍；而且本线程被同优先级的兄弟线程
+ * （gimbal / mcu_inter / inter_rx 都是 ThreadPrio::High）拖后时，迟到量完全不补偿 ——
+ * 云台环就是这个原因从 1000Hz 掉到了 664Hz，改成本形式后回到 991Hz。
+ * 绝对截止时刻把 tick 量化误差和唤醒延迟一起吸收，只要循环体 < period 平均周期就恒为 period。
  */
 static void Task(void*, void*, void*)
 {
+    const int64_t period = k_ms_to_ticks_ceil64(kPeriodMs);
+    int64_t deadline = k_uptime_ticks() + period;   // 下一个周期的绝对截止 tick
+
     for (;;)
     {
-        const int64_t tick_start = k_uptime_ticks();
-
         ReadCommand();
         ReadGimbalYaw();
         UpdateTarget();
 
         ControlCalculate();
-        PowerAllocate();
+        // PowerAllocate();
         FramePublish();
         FlushTx();
         // VofaPublish();
 
-        const int64_t period = k_ms_to_ticks_ceil64(kPeriodMs);
-        const int64_t used   = k_uptime_ticks() - tick_start;
-        if (used < period) {
-            k_sleep(K_TICKS(period - used));
+        // 睡到绝对截止时刻；本拍已经过点（循环体 > period）就直接重排基准，不往后欠债
+        if (k_uptime_ticks() < deadline) {
+            k_sleep(K_TIMEOUT_ABS_TICKS(deadline));
+        } else {
+            deadline = k_uptime_ticks();
         }
+        deadline += period;
     }
 }
 
