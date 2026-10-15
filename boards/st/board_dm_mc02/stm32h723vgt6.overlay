@@ -132,6 +132,12 @@
 	pinctrl-names = "default";
 	cs-gpios = <&gpioc 0 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
 		   <&gpioc 3 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+	/* SPI2(BMI088) DMA：DMAMUX1 通道 2/3 → DMA1 Stream2/3。
+	 * 请求号 SPI2_TX=40 / SPI2_RX=39（与 SPI2 共用 0x40003800 的 i2s2 节点里给出的映射）。
+	 * 通道 0/1 已给 USART1，这里错开用 2/3，务必落在 DMA1（dmamux 信道 0-7 → DMA1）。 */
+	dmas = <&dmamux1 2 40 (STM32_DMA_PERIPH_TX | STM32_DMA_PRIORITY_HIGH)>,
+	       <&dmamux1 3 39 (STM32_DMA_PERIPH_RX | STM32_DMA_PRIORITY_HIGH)>;
+	dma-names = "tx", "rx";
 	status = "okay";
 
 	bmi088_accel: bmi088-accel@0 {

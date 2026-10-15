@@ -5,90 +5,6 @@
  * @version 0.2
  * @date 2026-09-16
  *
- * ## 坐标与角度约定
- *
- *   yaw   ：绕 z 轴，逆时针为正，可无限旋转（虚拟角连续累加，不折叠）
- *   pitch ：抬头为正，软限位 [kPitchMin, kPitchMax]
- *
- * ## 数据来源与所有权
- *
- * | 数据 | 通道 / 段 | 生产者 | 本线程的角色 |
- * |------|-----------|--------|--------------|
- * | 目标角 | zbus `pub_from_head` | thread/inter_rx | 轮询读（帧断 / 遥控失效 → 停机、力矩 0） |
- * | IMU 角反馈 | `from_head` 的 `ImuState` 段（仅 IMU 模式） | 上板（随指令帧下发） | 轮询读 + flags 判活 |
- * | 编码器角反馈 | `.can_rx3` 段 | 本线程（总线所有者） | 只注册 CAN_RX_HANDLER |
- * | 电机控制帧 | k_msgq `user_can3_msgq` | 本线程 | 入队后由本线程外发 |
- * | 云台相对底盘角 | zbus `pub_gimbal_to` | 本线程 | 发布（底盘做云台系→车体系变换） |
- * | 电机反馈 yaw | topic `gimbal_to` | 本线程 | 发送线程拉取后打包发给上板 |
- *
- * 总线所有权：user-can3 由本线程持有并初始化（Init + 收帧分发入口），
- * 与 thread/can（can1）、thread/mcu_inter（can2）的约定一致。
- *
- * ## 控制流（每轴一组双环）
- *
- *     目标角(虚拟角) ─→ ⊖ ─→ [位置环] ─→ ω_ref ─→ ⊖ ─→ [角速度环] ─→ τ ─→ DM MIT 帧
- *                                ↑                          ↑
- *                        实测角(IMU/编码器)            实测 ω(电机反馈)
- *
- *   DM 侧 kp/kd = 0，闭环全在板端；力矩由内环直接给出。
- *
- * ## 反馈源：按轴 + 按环独立选（`kYawPosFb` / `kYawRateFb` / `kPitchPosFb` / `kPitchRateFb`）
- *
- *   · Encoder：电机编码器 —— "云台相对底盘"的关节角 + 关节角速度，1ms 更新、无融合延迟；
- *   · Imu：上板 IMU（`ImuState.total_yaw_angle` / `yaw_omega` / `pitch_angle` / `pitch_omega`，
- *     随上板指令帧一起下来）—— 世界系绝对角 + 陀螺角速度，底盘自转时云台可稳住指向。
- *     取上板而不是本板 imu_to：IMU 装在上板/云台侧，本板这路 IMU 的安装方向对不上。
- *     上板 IMU 判活看 CommState.flags 的 kCommFlagImuOk，失效即不再驱动电机。
- *
- * 参考系约束（重要）：同一轴的外环（角度）和内环（角速度）必须同参考系，否则内环的
- * 给定和反馈之间差一个"底盘角速度"，环路会一直带着静差/抖动。跨参考系时（外环世界系、
- * 内环关节系）必须靠 kYawChassisRateFfGain 前馈把给定折算过去。
- *
- * 当前选型（实测后锁定）：
- *   yaw   → IMU/IMU（世界系；陀螺 z 实测干净且与电机速度反馈一致到 3%）
- *   pitch → Encoder/Encoder（上板 pitch 陀螺链路实测脏：逐毫秒跳变超出机构物理极限）
- *
- * `CONFIG_TRD_GIMBAL_FB_IMU` 只决定"IMU 那套代码要不要编进来"，不再决定每轴选哪个源。
- *
- * ## 对齐沿（安全）
- *
- *   每轴记录上一拍的使能状态、反馈有效性与掉线/停机状态；出现下面四种"沿"时，
- *   把虚拟角直接对齐到实测角（IMU 或编码器）并清 PID 积分，避免目标与实际差
- *   一大截导致电机猛抽 / 撞限位：
- *     ① 电机「失能 → 使能」；
- *     ② 角度反馈「无效 → 有效」（IMU 掉线恢复等，期间云台可能是自由状态）。
- *     ③ 电机「掉线 → 恢复」（反馈帧超时期间不驱动，云台可能被外力带走）；
- *     ④ 上板「停机 → 解除」（停机期间力矩 0，pitch 可能已经掉下来）。
- *   对齐必须把"指令累计量"一起写回（yaw 的 `g_yaw_cmd`）：`UpdateTarget()` 每拍都拿指令
- *   重算虚拟角，只写虚拟角的话对齐只活 1ms —— 停机解除后 yaw 冲回虚拟 0 就是漏了这步。
- *   pitch 的指令是绝对量（摇杆居中 = 0°，见 ReadCommand），没有可重锚的累计量：停机解除后
- *   回到摇杆指令角是设计如此（操作员要的就是那个绝对角），不是漏对齐。
- *
- * ## 使能 / 失能 / 故障 / 掉线策略
- *
- *   · 上电使能：DM 上电默认失能，thread_init 初始化完两轴就各排一帧 Enable 命令帧
- *     （后续由下面的策略接管，不依赖控制环"顺手"发第一帧）；
- *   · 失能（err == Disable）：不闭环，每 kEnableResendTicks = 200ms 补发一帧使能命令，
- *     电机重新上电/复位后自动回到使能态；其余时间发 0 力矩控制帧喂通讯看门狗
- *     （停发帧会被电机判成"通讯丢失"，反而回不到使能态）；
- *   · 故障（超压/欠压/过流/MOS 过温/线圈过温/通讯丢失/过载/编码器未校准）：
- *     不闭环、不重发使能、不代替电机清故障（不发 ClearErr），只在故障码变化的沿
- *     上报一次（带故障名）；期间照样发 0 力矩控制帧保持通讯，故障消失回落到失能态后
- *     再由上面的策略自动使能；
- *   · 掉线（kLostTimeoutMs 内一帧反馈都没有 = 电机断电/断线）：不驱动，按"失能"
- *     同样周期性补发使能命令（不发 0 力矩帧：对端收不到，只会刷出无 ACK 错误帧）；
- *     这期间 snap 是旧值，绝不拿它闭环；
- *   · 对齐沿：失能→使能、掉线→恢复、反馈无效→有效、停机→解除，四种沿都把
- *     虚拟角对齐到当前实测角并清积分，避免恢复瞬间以最大角速度冲回旧目标；
- *   · 角度反馈无效（IMU 模式）：力矩置 0 但保持发帧（不拿陈旧角度闭环）；
- *   · 上板停机位（CommState.chassis_spin == Stop）：力矩置 0（松力，不保持姿态），
- *     电机保持使能、帧照发；
- *   · 指令链路失效（两种都按"停机"处理，停机位 = 力矩 0 松力、电机保持使能、帧照发）：
- *     ① 上板还在发帧但 CommState.flags 里没有 LinkOk（上板明确告知它的遥控源掉线）；
- *     ② 上板 CAN 帧整个断掉（msg.online = false）。两种都不允许拿上一帧陈旧指令
- *     继续驱动云台；恢复后由"停机→解除"的对齐沿重新对位（对齐实测角 + 清积分），
- *     所以不会突然冲回停机前的目标。
- *
  *
  *
  *
@@ -160,32 +76,40 @@ static constexpr float kMotorVmax   = 30.0f;                      // 电机侧�
 // 电机/协议力矩标定：必须等于电机手册的 TMAX（反馈力矩解码与 MIT 帧编码都用它）
 static constexpr float kMotorTmax   = 10.0f;
 // 内环输出限幅（本线程实际发出的力矩上限，电机侧）——保护机构用，先给小值：
-static constexpr float kTorqueLimit = 4.0f;
+static constexpr float kTorqueLimit = 6.0f;
 static_assert(kTorqueLimit <= kMotorTmax, "inner-loop torque limit exceeds motor TMAX");
 // 位置环输出的是"关节侧"角速度给定，上限 = 电机侧上限 ÷ 减速比（否则会超出 VMAX）
-static constexpr float kMaxOmegaRef = kMotorVmax / kJointRatio;   // = 3.0 rad/s（关节侧）
+static constexpr float kMaxOmegaRef = kMotorVmax / kJointRatio;   // = 30.0 rad/s（关节侧）
 
 // ==================== PID 初值（yaw / pitch 各自一套，手动整定） ====================
 //pitch encoder反馈:out_kp = 12.0f out_ki = 0.0f in_kp = 2.0f in_ki = 2.5f
 
-static constexpr float kYawPosKp     = 8.0f;
+static constexpr float kYawPosKp     = 11.0f;
 static constexpr float kYawPosKi     = 0.0f;
-static constexpr float kYawOmegaKp   = 1.5f;
-static constexpr float kYawOmegaKi   = 2.5f;
+static constexpr float kYawPosKd     = 0.0f;
+static constexpr float kYawOmegaKp   = 2.0f;
+static constexpr float kYawOmegaKi   = 3.0f;
+static constexpr float kYawOmegaKd   = 0.0f;
+
 static constexpr float kPitchPosKp   = 12.0f;
 static constexpr float kPitchPosKi   = 0.0f;
+static constexpr float kPitchPosKd   = 0.0f;
 static constexpr float kPitchOmegaKp = 2.0f;
-static constexpr float kPitchOmegaKi = 2.5f;
+static constexpr float kPitchOmegaKi = 1.5f;
+static constexpr float kPitchOmegaKd = 0.0f;
 
 // ==================== 角速度环反馈低通（alg::filter::LowPassFilter）====================
-// 角速度环的反馈（IMU 陀螺 / 电机编码器）都有高频噪声，直接进环会被 kp 放大成抖动、
-// 啸叫。这里在反馈进环前加一阶低通（截止频率 Hz，≤0 = 直通）。
-// 两轴可以不同：编码器相对干净可以给高一些，上板 IMU 陀螺噪声大可以给低一些。
-// ⚠️ 越低越平滑但相位滞后越大（100 Hz ≈ 1.6 ms），整定 kp 时要把这段滞后算进去。
-static constexpr float kYawOmegaLpfHz   = 100.0f;
+static constexpr float kYawOmegaLpfHz   = 50.0f;
 static constexpr float kPitchOmegaLpfHz = 100.0f;
 
+// ==================== 位置环 D 项低通（Hz，≤0 = 不滤）====================
+static constexpr float kYawPosDLpfHz    = 30.0f;
+static constexpr float kPitchPosDLpfHz  = 30.0f;
+
 // 方向极性（实测后锁定：单轴点动确认正方向）
+static constexpr int8_t kYawAutoSign    = -1;
+static constexpr int8_t kPitchAutoSign  = -1;
+
 static constexpr int8_t kYawMotorSign   = +1;
 static constexpr int8_t kPitchMotorSign = +1;
 #if CONFIG_TRD_GIMBAL_FB_IMU
@@ -201,7 +125,7 @@ enum class FbSource : uint8_t { Encoder, Imu };
 
 static constexpr FbSource kYawPosFb    = FbSource::Imu;      // yaw 外环：世界系绝对航向
 static constexpr FbSource kYawRateFb   = FbSource::Imu;      // yaw 内环：世界系陀螺 z
-static constexpr FbSource kPitchPosFb  = FbSource::Imu;      // pitch 外环：关节角
+static constexpr FbSource kPitchPosFb  = FbSource::Imu;      // pitch 外环：世界角
 static constexpr FbSource kPitchRateFb = FbSource::Encoder;  // pitch 内环：关节角速度
 
 /// 反馈源名字（启动日志用）
@@ -260,6 +184,11 @@ static AxisState g_pitch_state {};
 
 #define YAWSENSITIVE 0.008f
 
+// yaw 摇杆速率前馈
+
+static constexpr float kYawStickRateFfGain = 0.0f;
+static constexpr float kYawStickRateGain   = kYawStickRateFfGain * YAWSENSITIVE / kDt;
+
 static uint8_t g_auto_aim_cmd = 0;
 static float g_auto_aim_yaw_angle = 0.0f;
 static float g_auto_aim_yaw_omega = 0.0f;
@@ -267,9 +196,19 @@ static float g_auto_aim_yaw_accl  = 0.0f;
 static float g_auto_aim_pitch_angle = 0.0f;
 static float g_auto_aim_pitch_omega = 0.0f;
 static float g_auto_aim_pitch_accl  = 0.0f;
+/// 自瞄退出沿：只在"自瞄 1→0"的那一拍为 true（ReadCommand 生成，每拍先清零）。
+/// 与停机解除同样处理：把 yaw 虚拟角重锚到当前实测角，避免退出自瞄瞬间冲回
+/// 自瞄前累积的摇杆指令角（见 ProcessAxis 的对齐沿）。
+static bool  g_auto_aim_off = false;
 static float g_yaw_cmd      = 0.0f;   // 上板指令角（yaw 已折算到离虚拟角最近的等价值）
+/// yaw 摇杆速率前馈（rad/s，外环参考系 = 世界系）：每拍由 ReadCommand 从当前摇杆值直接算出，
+/// 是"速率"不是"累计量"，所以对齐沿不需要重锚；指令链路失效时清零（见 ReadCommand）。
+static float g_yaw_stick_omega_ff = 0.0f;
+
 static float g_pitch_cmd    = 0.0f;   // 上板指令角（已限幅）
 static float g_yaw_target   = 0.0f;   // 虚拟角：位置环的实际目标
+/// 板内测试波形注入到【内环速率给定】的量（rad/s，外环参考系）：速率注入模式用，见 WaveValue
+static float g_wave_rate    = 0.0f;
 static float g_pitch_target = 0.0f;
 static float yaw_out_torque = 0.0f;   // yaw 内环输出力矩（电机侧 N·m，限幅后）
 static float pitch_out_torque = 0.0f; // pitch 内环输出力矩（电机侧 N·m，限幅后）
@@ -301,113 +240,123 @@ struct Feedback {
 
 // #define CONFIG_WAVE_TEST 1
 
-// 测试波形选择：整定 PID 用阶跃(Step)，看跟随/频响用正弦(Sine)。改这一行切换。
-enum class TestWave : uint8_t { Sine, Step };
-static constexpr TestWave kTestWave = TestWave::Step;
+// ==================== 板内测试波形（PID 整定 / 频响测量）====================
+// CONFIG_WAVE_TEST 打开后，yaw 不再跟随上板指令，改由下面这套自己产生测试信号。
+//
+//   kWaveInject == Position：波形加在"位置给定"上     → 测【位置闭环】频响（角度跟随）
+//   kWaveInject == Rate    ：位置环开环，波形直接加在【内环速率给定 ω_ref】上
+//                            → 测角速度环本身的频响（8.2Hz 那类抖动看这个）
+//
+//    幅值按当前频点自动缩放（见 TestAmpAt）。不缩放的话给定一上高频就把力矩顶到
+//    kTorqueLimit，测到的是饱和/非线性而不是频响（8Hz、0.2rad 要 ~24N·m，超限 4 倍）。
+enum class TestWave   : uint8_t { Sine, Sweep, Step };
+enum class WaveInject : uint8_t { Position, Rate };
 
-// ==================== 扫频：每 5s 换一个频点 ====================
+static constexpr TestWave   kTestWave   = TestWave::Step;
+static constexpr WaveInject kWaveInject = WaveInject::Position;
+
+/// 关掉 CONFIG_WAVE_TEST 时，不要把"内环注入"当成真的打开
+static constexpr bool kWaveRateInject =
+#ifdef CONFIG_WAVE_TEST
+    (kWaveInject == WaveInject::Rate);
+#else
+    false;
+#endif
+
+// ---- 幅值 ----
+// 辨识值 J ≈ 0.048 kg·m²、kTorqueLimit = 6 N·m；只给波形一半力矩预算，另一半留给环路
+// 自己的调节（不然"给定就吃满限幅"，测出来又是饱和的）。
+static constexpr float kTestAccelMax = 0.5f * kTorqueLimit / 0.048f;   // rad/s² ≈ 62.5
+// 低频段的幅值上限：位置注入是 rad，速率注入是 rad/s
+static constexpr float kTestAmpPos  = 0.20f;
+static constexpr float kTestAmpRate = 2.0f;
+
+// 阶跃（方波）参数：看 VOFA 的"给定 vs 反馈"读上升时间/超调/稳态误差
+static constexpr float    kStepAmp    = 0.2f;    // 位置注入时的阶跃高度（rad）
+static constexpr uint32_t kStepHalfMs = 2000;    // 每个电平保持多久（ms）
+
+/**
+ * @brief 当前频点允许的波形幅值
+ *
+ * 位置注入：τ ≈ J·A·ω²  →  A ≤ kTestAccelMax / ω²
+ * 速率注入：τ ≈ J·A·ω   →  A ≤ kTestAccelMax / ω
+ * 取上面和低频上限里小的那个，保证给定不会把力矩顶到 kTorqueLimit。
+ */
+static float TestAmpAt(float f_hz)
+{
+    const bool  rate = (kWaveInject == WaveInject::Rate);
+    const float base = rate ? kTestAmpRate : kTestAmpPos;
+    if (f_hz <= 0.01f) {
+        return base;
+    }
+    const float w   = k2Pi * f_hz;
+    const float cap = kTestAccelMax / (rate ? w : w * w);
+    return (cap < base) ? cap : base;
+}
+
+// ==================== 固定正弦 / 扫频 ====================
+static constexpr float kSinFreqHz = 8.0f;    // 固定正弦的频点（Hz）
 static constexpr float kSweepFreqs[] = {
-    2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f,8.0f, 
-    // 9.0f, 10.0f, 11.0f, 12.0f, 13.0f, 14.0f,
-    // 15.0f, 16.0f, 17.0f, 18.0f, 19.0f, 20.0f
+    1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f, 8.0f, 10.0f, 12.0f
 };
 static constexpr uint32_t kSweepDwellMs = 5000;
-static constexpr float    kSweepAmp     = 0.1f;    // rad，按轴调
 
-static bool     g_sweep_on    = true;   // 触发开关
-static float    g_sweep_phase = 0.0f;    // 连续相位
-static uint32_t g_sweep_t0    = 0;       // 当前频点的开始时刻
-static uint8_t  g_sweep_idx   = 0;
+// ---- 运行状态 ----
+static bool     g_wave_on    = true;         // 触发开关：false = 不注入
+static float    g_wave_phase = 0.0f;         // 连续相位（换频点不跳相）
+static uint32_t g_sweep_t0   = 0;            // 当前频点的开始时刻
+static uint8_t  g_sweep_idx  = 0;
+static float    g_wave_freq  = kSinFreqHz;   // 当前频点（板内）
+static float    g_wave_value = 0.0f;         // 本拍波形值（位置注入 rad / 速率注入 rad/s）
 
 /**
- * @brief 扫频，每拍调用一次
- * @return 叠加在 base 上的扫频量（rad）
- * 
+ * @brief 产生本拍测试波形，每拍调用一次
+ *
+ * 固定正弦 / 扫频 / 方波三种；相位在 [0,2π) 内累加回绕，幅值按频点缩放（TestAmpAt）。
+ *  每个控制周期只能调用一次：调用两次会让相位走两步、输出频率翻倍。
  */
-static float SweepTarget(float base)
+[[maybe_unused]] static float WaveValue()
 {
-    constexpr uint8_t n = sizeof(kSweepFreqs) / sizeof(kSweepFreqs[0]);
-
-    if (!g_sweep_on) {
-        return base;
+    if (!g_wave_on) {
+        g_wave_value = 0.0f;
+        return 0.0f;
     }
 
-    // ---- 到点换频点：t0 用累加而不是 = now，保证平均驻留正好 5s ----
-    const uint32_t now = k_uptime_get_32();
-    if (now - g_sweep_t0 >= kSweepDwellMs) {
-        g_sweep_t0 += kSweepDwellMs;
-        if (++g_sweep_idx >= n) {
-            g_sweep_idx = 0;             // 扫完循环；想停就 g_sweep_on = false
+    if (kTestWave == TestWave::Step) {
+        // 用墙钟计时（不数拍），被拖后/丢拍也不会让沿的时刻漂
+        const uint32_t half = k_uptime_get_32() / kStepHalfMs;
+        const float    s    = (half & 1u) ? -1.0f : 1.0f;
+        g_wave_freq  = 1.0f / (2.0f * static_cast<float>(kStepHalfMs) * 1e-3f);
+        g_wave_value = s * kStepAmp;
+        return g_wave_value;
+    }
+
+    if (kTestWave == TestWave::Sweep) {
+        constexpr uint8_t n = sizeof(kSweepFreqs) / sizeof(kSweepFreqs[0]);
+        if (g_sweep_t0 == 0u) {
+            g_sweep_t0 = k_uptime_get_32();      // 首次调用对齐计时基准（别从 uptime=0 算）
         }
-        LOG_INF("sweep -> %.2f Hz", (double)kSweepFreqs[g_sweep_idx]);
+        const uint32_t now = k_uptime_get_32();
+        // t0 用累加而不是 = now：平均驻留正好 kSweepDwellMs
+        if (now - g_sweep_t0 >= kSweepDwellMs) {
+            g_sweep_t0 += kSweepDwellMs;
+            g_sweep_idx = static_cast<uint8_t>((g_sweep_idx + 1u) % n);
+            LOG_INF("sweep -> %.2f Hz (amp %.4f)", (double)kSweepFreqs[g_sweep_idx],
+                    (double)TestAmpAt(kSweepFreqs[g_sweep_idx]));
+        }
+        g_wave_freq = kSweepFreqs[g_sweep_idx];
+    } else {
+        g_wave_freq = kSinFreqHz;
     }
 
-    // ---- 相位累加：换频瞬间相位连续，不会跳相 ----
-    g_sweep_phase += k2Pi * kSweepFreqs[g_sweep_idx] * kDt;
-    if (g_sweep_phase >= k2Pi) {
-        g_sweep_phase -= k2Pi;           // 别让它无限涨，float 久了会掉精度
+    g_wave_phase += k2Pi * g_wave_freq * kDt;
+    if (g_wave_phase >= k2Pi) {
+        g_wave_phase -= k2Pi;                // 别让它无限涨，float 久了会掉精度
     }
 
-    return base + kSweepAmp * sinf(g_sweep_phase);
+    g_wave_value = TestAmpAt(g_wave_freq) * sinf(g_wave_phase);
+    return g_wave_value;
 }
-
-static constexpr float kSinFreqHz = 3.0f;    // 指定频率（Hz），按需修改
-static constexpr float kSinAmp    = 0.2f;    // rad，按轴调
-
-static bool  g_sin_on    = true;   // 触发开关
-static float g_sin_phase = 0.0f;   // 连续相位
-
-/**
- * @brief 固定频率正弦，每拍调用一次
- * @return 叠加在 base 上的正弦量（rad）
- *
- * 相位在 [0, 2π) 内累加并回绕，长时间运行不会因 float 精度掉相。
- * 每个控制周期只能调用一次：调用两次会让相位走两步、输出频率翻倍。
- */
-static float SinTarget(float base)
-{
-    if (!g_sin_on) {
-        return base;
-    }
-
-    g_sin_phase += k2Pi * kSinFreqHz * kDt;
-    if (g_sin_phase >= k2Pi) {
-        g_sin_phase -= k2Pi;
-    }
-
-    return base + kSinAmp * sinf(g_sin_phase);
-}
-
-// ==================== 阶跃给定（整定 PID 用） ====================
-// 方波式阶跃：在 +kStepAmp 与 -kStepAmp 之间每 kStepHalfMs 跳一次。
-// 看 VOFA 的"目标 vs 反馈"两条线就能读上升时间/超调/稳态误差。
-static constexpr float    kStepAmp    = 0.20f;   // rad，阶跃高度（半幅）；pitch 别超软限位
-static constexpr uint32_t kStepHalfMs = 1000;    // 每个电平保持多久（ms），半周期
-
-static bool g_step_on = true;                     // 触发开关
-
-/**
- * @brief 阶跃（方波）给定，每拍调用一次
- * @param base 叠加基准
- * @return base ± kStepAmp
- *
- * 用 k_uptime_get_32()（毫秒墙钟）计时，而不是数循环拍数：
- * 即使某一拍被拖后、或丢了几拍，阶跃沿的时刻也不会漂。
- * 与 SinTarget 同一约定 —— 每个控制周期只能调用一次。
- */
-static float StepTarget(float base)
-{
-    if (!g_step_on) {
-        return base;
-    }
-
-    // 第几个半周期；偶数半周期 +A，奇数半周期 -A，如此循环
-    const uint32_t half = k_uptime_get_32() / kStepHalfMs;
-    const float sign = (half & 1u) ? -1.0f : 1.0f;
-
-    return base + sign * kStepAmp;
-}
-
 
 /**
  * @brief 读上板云台指令（角度）并更新指令角
@@ -424,6 +373,8 @@ static void ReadCommand()
 {
     static topic::from_head::Message msg {};
     static bool online_prev = false;
+
+    g_auto_aim_off = false;                        // 退出沿是单拍脉冲：每次先清零，只在下面的下降沿置位
 
     if (zbus_chan_read(&pub_from_head, &msg, K_NO_WAIT) != 0) {
         return;                                    // 读忙：沿用上一轮指令
@@ -444,6 +395,9 @@ static void ReadCommand()
                     static_cast<unsigned>(msg.comm.flags));
         }
         gimbal_stop = true;
+        // 前馈也是"往电机送力矩的一个来源"，指令链路失效必须和 g_yaw_cmd 一起作废：
+        // 否则恢复瞬间会拿掉线前的摇杆速率再推一拍（8 rad/s 量级）。
+        g_yaw_stick_omega_ff = 0.0f;
         online_prev = false;
         return;
     }
@@ -464,22 +418,37 @@ static void ReadCommand()
 
     // 自瞄生效：遥控自瞄开关 + 上板确认 PC 自瞄链路有效（VisionOk；PC 掉线/未锁定即清零）
     g_auto_aim_cmd         = (msg.comm.Switch.AutoAim != 0u) && inter_cmd::CommVisionOk(msg.comm);
-    g_auto_aim_yaw_angle   = RdFloat(msg.autoaim.yaw_angle);
+    // 说明：PC 给的是"目标角 − 当前实际角"的偏差，上板已把它折算成**绝对角**再下发
+    // （折算在上板做，因为只有上板看得到 PC 帧边界，见 infantry_head thread/mcu_inter），
+    // 这里按【绝对角】用：yaw 与 IMU 世界航向同参考系，pitch 与 IMU 俯仰同参考系。
+    g_auto_aim_yaw_angle   = kYawAutoSign * RdFloat(msg.autoaim.yaw_angle);
     g_auto_aim_yaw_omega   = RdFloat(msg.autoaim.yaw_omega);
     g_auto_aim_yaw_accl    = RdFloat(msg.autoaim.yaw_accl);
-    g_auto_aim_pitch_angle = RdFloat(msg.autoaim.pitch_angle);
+    g_auto_aim_pitch_angle = kPitchAutoSign * RdFloat(msg.autoaim.pitch_angle);
     g_auto_aim_pitch_omega = RdFloat(msg.autoaim.pitch_omega);
     g_auto_aim_pitch_accl  = RdFloat(msg.autoaim.pitch_accl);
 
-    g_yaw_cmd   = g_yaw_cmd + msg.comm.yaw_angle * YAWSENSITIVE;
-    g_pitch_cmd = msg.comm.pitch_angle;
-    if(g_pitch_cmd < 0.0f)
-    {
-        g_pitch_cmd = g_pitch_cmd * -kPitchMin;
-    }
-    else
-    {
-        g_pitch_cmd = g_pitch_cmd * kPitchMax;
+    // 自瞄退出沿：只在"上一拍自瞄、这一拍不瞄"时为真，交给 ProcessAxis 做 yaw 的对齐沿
+    static bool auto_aim_prev = false;
+    const bool  auto_aim_now  = (g_auto_aim_cmd != 0u);
+    g_auto_aim_off = auto_aim_prev && !auto_aim_now;
+    auto_aim_prev  = auto_aim_now;
+
+    if (auto_aim_now) {
+        g_yaw_stick_omega_ff = 0.0f;
+    } else {
+        g_yaw_cmd += msg.comm.yaw_angle * YAWSENSITIVE;
+        // 前馈：同一个 ω_shaped，直接进内环给定（角度斜坡由它跟着，位置环只修残差）
+        g_yaw_stick_omega_ff = msg.comm.yaw_angle * kYawStickRateGain;
+        g_pitch_cmd = msg.comm.pitch_angle;
+        if(g_pitch_cmd < 0.0f)
+        {
+            g_pitch_cmd = g_pitch_cmd * -kPitchMin;
+        }
+        else
+        {
+            g_pitch_cmd = g_pitch_cmd * kPitchMax;
+        }
     }
 }
 
@@ -495,8 +464,9 @@ static void UpdateTarget()
 #ifndef CONFIG_WAVE_TEST
     if(g_auto_aim_cmd)
     {
-        g_yaw_target   = g_yaw_cmd + g_auto_aim_yaw_angle;
-        g_pitch_target = std::clamp(g_pitch_cmd + g_auto_aim_pitch_angle, kPitchMin, kPitchMax);
+        // 自瞄：上板已把"目标−当前"偏差折算成绝对角，这里直接当绝对目标用
+        g_yaw_target   = g_auto_aim_yaw_angle;
+        g_pitch_target = std::clamp(g_auto_aim_pitch_angle, kPitchMin, kPitchMax);
     }
     else
     {
@@ -504,9 +474,17 @@ static void UpdateTarget()
         g_pitch_target = std::clamp(g_pitch_cmd, kPitchMin, kPitchMax);
     }
 #else
-    const float test = (kTestWave == TestWave::Step) ? StepTarget(0.0f) : SinTarget(0.0f);
-    g_yaw_target   = test;                       // yaw 要一起测时放开（无软限位）
-    g_pitch_target = std::clamp(test, kPitchMin, kPitchMax);
+    // 板内测试波形：每拍只在这里产生一次（WaveValue 内部累加相位）
+    const float wave = WaveValue();
+    if (kWaveRateInject) {
+        // 速率注入：位置环在 ProcessAxis 里开环，给定只走 g_wave_rate → 测内环频响
+        g_wave_rate  = wave;                     // rad/s
+        g_yaw_target = 0.0f;
+    } else {
+        g_wave_rate  = 0.0f;
+        g_yaw_target = wave;                     // rad：加在位置给定上（无软限位）
+    }
+    // g_pitch_target = std::clamp(wave, kPitchMin, kPitchMax);
 #endif
 }
 
@@ -713,6 +691,62 @@ static const char *ErrName(DmErrorStatus e)
 
 // ==================== 单轴控制 ====================
 
+// ==================== 自瞄 yaw 前馈（模型逆动力学）====================
+// 辨识模型（yaw 轴）：J·θ̈ + b·θ̇ = τ，J = 0.048 kg·m²、b = 0.04 N·m·s/rad。
+// 自瞄时 PC 下发目标的角速度 θ̇*（yaw_omega）和角加速度 θ̈*（yaw_accl），用它做两路前馈：
+//   · 速度前馈：ω_ref += θ̇*            —— 目标本来就在动，直接告诉内环，位置环只修残差
+//   · 力矩前馈：τ_ff = J·θ̈* + b·θ̇*     —— 把已知的惯量/阻尼负载直接补上，PID 不用靠积分去猜
+// 目前只给 yaw（pitch 暂不做）。J/b 的参考系 = 内环反馈所在的系（yaw 内环取 IMU 世界系陀螺）。
+static constexpr float kAimYawJ        = 0.048f;   // kg·m²
+static constexpr float kAimYawB        = 0.04f;    // N·m·s/rad
+static constexpr float kAimYawFfGain   = 1.0f;     // 整定旋钮：0 = 关掉前馈，1 = 全模型
+static constexpr float kAimYawFfTauMax = 0.7f * kTorqueLimit;   // 力矩前馈限幅（给 PID 留余量）
+
+/// 自瞄 yaw 前馈量（物理系：逆时针为正），直接喂给 ProcessAxis 的两个前馈入口
+struct AimYawFf {
+    float omega_ff = 0.0f;   // rad/s：加到内环角速度给定
+    float tau_ff   = 0.0f;   // N·m  ：加到内环力矩输出
+};
+
+static AimYawFf yaw_aim_ff = { 0.0f, 0.0f };
+
+/**
+ * @brief 算本拍自瞄 yaw 前馈（速度 + 力矩）
+ *
+ * 只在自瞄生效（g_auto_aim_cmd，已含 VisionOk）时给；其余情况返回 0 —— 前馈是直接推力矩的
+ * 一路，绝不能带陈旧值。符号与角度一致：PC 下发的 ω/α 是那个角度的导数，用同一个
+ * kYawAutoSign 折到物理系（与位置环反馈 fb.ang 同系）。
+ */
+static AimYawFf YawAutoAimFeedforward()
+{
+    AimYawFf f {};
+    if (g_auto_aim_cmd == 0u) {
+        return f;
+    }
+
+    const float w = static_cast<float>(kYawAutoSign) * g_auto_aim_yaw_omega;   // rad/s
+    const float a = static_cast<float>(kYawAutoSign) * g_auto_aim_yaw_accl;    // rad/s²
+
+    f.omega_ff = kAimYawFfGain * w;
+    f.tau_ff   = std::clamp(kAimYawFfGain * (kAimYawJ * a + kAimYawB * w),
+                            -kAimYawFfTauMax, kAimYawFfTauMax);
+    return f;
+}
+
+/**
+ * @brief yaw 内环角速度前馈（外环参考系，rad/s）
+ *
+ */
+static float YawOmegaFeedforward()
+{
+#ifdef CONFIG_WAVE_TEST
+    const float stick_ff = 0.0f;
+#else
+    const float stick_ff = g_yaw_stick_omega_ff;
+#endif
+    return kYawChassisRateFfGain * g_chassis_yaw_rate + stick_ff;
+}
+
 /**
  * @brief 单轴：使能管理 + 双环 PID
  *
@@ -724,21 +758,29 @@ static const char *ErrName(DmErrorStatus e)
  *                     编码器模式取电机编码器关节角 + 关节角速度），两者必须同源
  * @param stop         上板停机位：true = 力矩置 0（松力，不保持姿态）
  * @param lost         本拍电机掉线判定：true = 反馈帧超时（snap 是旧值，不许闭环）
+ * @param auto_aim_off 自瞄退出沿（自瞄 1→0 的那一拍为 true，见 ReadCommand）：与停机解除
+ *                     同处理，把 yaw 虚拟角重锚到当前实测角，避免退出自瞄瞬间冲回旧指令角
  * @param snap         本拍电机快照（与反馈同帧，避免跨帧读数）
  * @param yaw_axis     true = yaw：对齐沿要把指令累计量 g_yaw_cmd 一起重锚（见下面的说明）
- * @param omega_ff     内环角速度给定前馈 (rad/s)：把外环所在参考系的给定折算到内环参考系，
- *                     外环世界系 + 内环关节系时 = −ω_底盘（见 kYawChassisRateFfGain）；
- *                     两环同参考系时传 0（默认）
+ * @param omega_ff     内环角速度给定前馈 (rad/s，外环参考系)：加在外环 PID 输出之上、进内环之前。
+ *                     两个来源叠加（见函数里的加法处）：
+ *                       · 参考系折算：外环世界系 + 内环关节系时 = −ω_底盘
+ *                         （见 kYawChassisRateFfGain）；两环同参考系时为 0；
+ *                       · 给定速率前馈：目标本身在动时（yaw 摇杆斜坡）直接把它的角速度给出来，
+ *                         让位置环只修残差（见 kYawStickRateGain）。
+ *                     两项都与"外环 PID 输出"同参考系、都是加性项，所以在同一处相加等价
+ *                     （clamp 放在加法之后，前馈也不能把给定推出限幅）。
  * @param tau_ff       内环力矩前馈 (N·m，关节系，抬头为正)：重力这类"已知负载力矩"直接
  *                     叠加在内环输出上。和 PID 输出一起限幅（不能绕过 kTorqueLimit）
  */
 static void ProcessAxis(Axis &axis, AxisState &st, int8_t sign,
                         float &target_angle, const Feedback &fb,
-                        bool stop, bool lost,
+                        bool stop, bool lost, bool auto_aim_off,
                         const DmMotor::Snapshot &snap,
                         bool yaw_axis, float &out_torque,
                         float omega_ff = 0.0f,
-                        float tau_ff = 0.0f)
+                        float tau_ff = 0.0f,
+                        bool open_pos_loop = false)
 {
     const bool enabled = (snap.err == DmErrorStatus::Enable);
 
@@ -766,13 +808,14 @@ static void ProcessAxis(Axis &axis, AxisState &st, int8_t sign,
             LOG_INF("gimbal axis feedback recovered");
         }
     }
-    // ---- 对齐沿：失能→使能、掉线→恢复、反馈无效→有效、停机→解除 ----
-    // 这几种情况下虚拟角都可能和实际差很远（停机/掉线期间电机不驱动，会被外力/重力带走），
-    // 直接对齐 + 清积分，避免恢复瞬间以最大角速度冲回旧目标 / 撞限位
+    // ---- 对齐沿：失能→使能、掉线→恢复、反馈无效→有效、停机→解除、自瞄→退出 ----
+    // 这几种情况下虚拟角都可能和实际差很远（停机/掉线期间电机不驱动会被外力/重力带走；
+    // 自瞄期间目标由自瞄链路给出、虚拟角/指令累计量停在自瞄前那股摇杆指令上），
+    // 直接对齐 + 清积分，避免切换瞬间以最大角速度冲回旧目标 / 撞限位
     const bool stop_release = st.stop_prev && !stop;
     const bool align_edge = (enabled && !st.enabled_prev) ||
                             (enabled && fb.valid &&
-                             (!st.fb_valid_prev || stop_release || lost_release));
+                             (!st.fb_valid_prev || stop_release || lost_release || auto_aim_off));
     if (align_edge) {
         if (fb.valid) {
             target_angle = fb.ang;
@@ -787,7 +830,9 @@ static void ProcessAxis(Axis &axis, AxisState &st, int8_t sign,
             axis.omega.SetIntegralError(0.0f);
             st.omega_lpf.Reset(fb.omega);      // 低通状态也对齐到当前反馈，别从旧值慢慢爬
             const char *why = stop_release ? "stop released"
-                                           : (lost_release ? "feedback recovered" : "ready");
+                                           : (auto_aim_off ? "auto-aim released"
+                                                           : (lost_release ? "feedback recovered"
+                                                                           : "ready"));
             if (yaw_axis) {
                 LOG_INF("gimbal yaw: %s, virtual angle re-anchored to %d mrad",
                         why, static_cast<int>(fb.ang * 1000.0f));
@@ -832,20 +877,31 @@ static void ProcessAxis(Axis &axis, AxisState &st, int8_t sign,
     }
 
 #ifdef CONFIG_WAVE_TEST
-    static float now_angle = 0;
-    if(align_edge && fb.valid)
-    {
-        now_angle = fb.ang;
+    // 位置注入时，板内给定要"搬进 IMU 世界角坐标系"：以对齐沿那一刻的实测角为基准。
+    // 基准只在 yaw 自己的对齐沿更新（原来是 yaw/pitch 共用一个 static，pitch 的对齐沿
+    // 会把 yaw 的基准冲掉）；速率注入模式位置环开环，不需要这个基准。
+    static float now_angle = 0.0f;
+    if (yaw_axis) {
+        if (align_edge && fb.valid) {
+            // 对齐沿那一拍 target_angle 已经被置成 fb.ang 了，这里只更新基准，不要再加一次
+            now_angle = fb.ang;
+        } else if (!open_pos_loop) {
+            target_angle += now_angle;
+        }
     }
-    if(yaw_axis)    {target_angle += now_angle;}
 #endif
 
     // 外环：角度 → 角速度给定（物理系）
-    axis.position.SetTarget(target_angle);
+    // open_pos_loop：测【内环】频响时把外环断开 —— 位置给定取当前实测角，位置环输出≈0，
+    // 给定只由 omega_ff 里的注入信号决定（否则位置环会把注入"抢"回去，测的不是内环）。
+    axis.position.SetTarget(open_pos_loop ? fb.ang : target_angle);
     axis.position.SetNow(fb.ang);
-    float omega_ref = std::clamp(axis.position.Calc(), -kMaxOmegaRef, kMaxOmegaRef);
-    // 参考系换算前馈：外环世界系、内环关节系时才非零，把"世界系角速度给定"折成
-    // "关节系角速度给定"；两环同参考系时恒为 0（见 kYawChassisRateFfGain）。
+    // 开环时也要跑一次 Calc()：让位置环的 D 项滤波状态跟着走，切回闭环时不跳
+    const float pos_out = axis.position.Calc();
+    float omega_ref = open_pos_loop ? 0.0f
+                                    : std::clamp(pos_out, -kMaxOmegaRef, kMaxOmegaRef);
+    // 内环给定前馈（外环参考系）= 参考系折算项 + 给定速率前馈项，见上面 @param omega_ff。
+    // 加法在 clamp 之后重新限幅：前馈同样不能把给定推出 kMaxOmegaRef。
     if (omega_ff != 0.0f) {
         omega_ref = std::clamp(omega_ref + omega_ff, -kMaxOmegaRef, kMaxOmegaRef);
     }
@@ -888,33 +944,46 @@ static void PublishAngles(const Feedback &yaw_fb, const Feedback &pitch_fb,
     (void)zbus_chan_pub(&pub_gimbal_to, &g, K_NO_WAIT);
 }
 
+/// VOFA 抽稀：1kHz 控制环每 kVofaDiv 拍发一帧。1 = 1kHz（测延迟/20Hz 频响最准，
+/// 若串口/上位机丢包就调大：2 = 500Hz、5 = 200Hz、10 = 100Hz）。
+static constexpr uint32_t kVofaDiv = 10;
+
 static void VofaPublish(const DmMotor::Snapshot &pitch_snap, const DmMotor::Snapshot &yaw_snap, const Feedback &yaw_fb, const Feedback &pitch_fb)
 {
     static uint32_t g_div = 0;
 
-    if (++g_div != 10)
+    if (++g_div != kVofaDiv)
     {
         return;
     }
     g_div = 0;
 
     const float frame[] = {
+        static_cast<float>(k_uptime_get_32()),
         g_yaw_target * rad_to_deg,
         yaw_fb.ang * rad_to_deg,
+        g_wave_rate * rad_to_deg,
         yaw_fb.omega * rad_to_deg,
+        g_yaw_state.omega_lpf.GetOutput() * rad_to_deg,
+        // yaw_snap.omega * rad_to_deg,
+        yaw_out_torque,
+
         yaw_.position.GetOut() * rad_to_deg,
-        yaw_snap.omega * rad_to_deg,
-        yaw_snap.torque,
+        NormalizeAngle(yaw_snap.radian) * rad_to_deg,
+        // yaw_snap.torque,
 
         // g_auto_aim_yaw_angle * rad_to_deg,
         // g_auto_aim_pitch_angle * rad_to_deg,
+        // yaw_aim_ff.omega_ff * rad_to_deg,   
+        // yaw_aim_ff.tau_ff,                 
+        // g_auto_aim_yaw_accl,            
 
         // g_pitch_target * rad_to_deg,
         // pitch_fb.ang * rad_to_deg,
-        pitch_fb.omega * rad_to_deg,
+        // pitch_fb.omega * rad_to_deg,
         // pitch_.position.GetOut() * rad_to_deg,
         // pitch_snap.radian * rad_to_deg,
-        pitch_snap.omega * rad_to_deg,
+        // pitch_snap.omega * rad_to_deg,
         // pitch_out_torque
     };
 
@@ -980,11 +1049,17 @@ static void Task(void*, void*, void*)
         // 底盘 yaw 角速度估计（前馈用）：ω_底盘 = ω_云台(世界系 IMU) − ω_关节(yaw 编码器)
         UpdateChassisYawRate(yaw_imu_fb, yaw_snap, yaw_lost);
 
+        // 自瞄 yaw 前馈（速度 + 力矩，模型逆动力学）：只给 yaw，见 YawAutoAimFeedforward
+        yaw_aim_ff = YawAutoAimFeedforward();
+
         ProcessAxis(yaw_,   g_yaw_state,   kYawMotorSign,
-                    g_yaw_target,   yaw_fb,   gimbal_stop, yaw_lost, yaw_snap,
-                    true, yaw_out_torque, kYawChassisRateFfGain * g_chassis_yaw_rate);
+                    g_yaw_target,   yaw_fb,   gimbal_stop, yaw_lost, g_auto_aim_off, yaw_snap,
+                    true, yaw_out_torque,
+                    YawOmegaFeedforward() + g_wave_rate + yaw_aim_ff.omega_ff,
+                    yaw_aim_ff.tau_ff,
+                    kWaveRateInject);
         ProcessAxis(pitch_, g_pitch_state, kPitchMotorSign,
-                    g_pitch_target, pitch_fb, gimbal_stop, pitch_lost, pitch_snap,
+                    g_pitch_target, pitch_fb, gimbal_stop, pitch_lost, g_auto_aim_off, pitch_snap,
                     false, pitch_out_torque, 0.0f,
                     PitchGravityFeedforward(pitch_fb.ang));
 
@@ -1056,33 +1131,38 @@ bool thread_init()
 
     // ---- 双环 PID（yaw / pitch 增益各自一套，取值见文件上方 k*PosKp / k*OmegaKp）----
     // 位置环：输出角速度给定，限幅 kMaxOmegaRef；角速度环：输出力矩给定，限幅 kTorqueLimit
-    auto make_pos_cfg = [](float kp, float ki) {
+    auto make_pos_cfg = [](float kp, float ki, float kd, float dLpfHz) {
         alg::pid::Pid::Config c {};
         c.kp      = kp;
         c.ki      = ki;
-        c.kd      = 0.0f;
+        c.kd      = kd;
         c.iOutMax = kMaxOmegaRef;      // 积分限幅与输出限幅一致，防止饱和蓄积分
         c.outMax  = kMaxOmegaRef;
         c.dt      = kDt;
         c.dFirst  = alg::pid::DFirst::Enable;
+        c.dLpfCutoffHz = dLpfHz;       // 位置环 D 项低通（裸微分会把 IMU 角度噪声放大进 ω_ref）
         return c;
     };
-    auto make_omega_cfg = [](float kp, float ki) {
+    auto make_omega_cfg = [](float kp, float ki, float kd) {
         alg::pid::Pid::Config c {};
         c.kp      = kp;
         c.ki      = ki;
-        c.kd      = 0.0f;
+        c.kd      = kd;
         c.iOutMax = kTorqueLimit / 2;
         c.outMax  = kTorqueLimit;      // 输出即力矩（电机侧），限幅保护机构
         c.dt      = kDt;
         c.dFirst  = alg::pid::DFirst::Enable;
+        // 角速度环是跟踪环：参考量一直在动、误差符号每拍都在翻，"防卡角"会把积分反复清掉，
+        // 内环退化成近似 P 环，稳态到不了给定（实测 DC 增益只有 ~0.63）。这里关掉；
+        // 积分仍受 iOutMax 限幅约束，不会无限饱和。
+        c.antiStuckReset = false;
         return c;
     };
 
     InitAxis(yaw_,   kYawCanId,   kYawMasterId,
-             make_pos_cfg(kYawPosKp,     kYawPosKi),   make_omega_cfg(kYawOmegaKp,   kYawOmegaKi));
+             make_pos_cfg(kYawPosKp, kYawPosKi, kYawPosKd, kYawPosDLpfHz), make_omega_cfg(kYawOmegaKp, kYawOmegaKi, kYawOmegaKd));
     InitAxis(pitch_, kPitchCanId, kPitchMasterId,
-             make_pos_cfg(kPitchPosKp,   kPitchPosKi), make_omega_cfg(kPitchOmegaKp, kPitchOmegaKi));
+             make_pos_cfg(kPitchPosKp, kPitchPosKi, kPitchPosKd, kPitchPosDLpfHz), make_omega_cfg(kPitchOmegaKp, kPitchOmegaKi, kPitchOmegaKd));
 
     // ---- 角速度环反馈低通（每轴一个实例，采样周期 = 控制周期）----
     g_yaw_state.omega_lpf.Init(kYawOmegaLpfHz, kDt);
@@ -1127,7 +1207,7 @@ CAN_RX_HANDLER(GIMBAL_RX, kPitchMasterId, [](uint8_t *data) {
     pitch_.motor.CanCpltRxCallback(data);
 }, pitch);
 
-REGISTER_INIT  (thread_init,  MidInit,   Mid, "gimbal_init");
-REGISTER_THREAD(thread_start, MidThread, Mid, "gimbal_start");
+REGISTER_INIT  (thread_init,  MidInit,   High, "gimbal_init");
+REGISTER_THREAD(thread_start, MidThread, High, "gimbal_start");
 
 } // namespace thread::gimbal

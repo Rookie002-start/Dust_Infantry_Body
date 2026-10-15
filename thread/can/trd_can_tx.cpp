@@ -51,7 +51,7 @@ static void Task(void*, void*, void*)
         can_frame tx{};
         tx.id  = 0x02;
         tx.dlc = 8;
-        uint8_t tx_data[] = {0xFF, 0xFF, 0xFF, 0xFF,0xFF, 0xFF,0xFF, 0xFD};
+        uint8_t tx_data[] = {0xFF, 0xFF, 0xFF, 0xFF,0xFF, 0xFF,0xFF, 0xFE};
         memcpy(tx.data, tx_data, sizeof(tx_data));
 
         if (!user_can1.Send(&tx)) {

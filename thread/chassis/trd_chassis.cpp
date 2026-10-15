@@ -157,7 +157,7 @@ static constexpr uint8_t kVofaWheel = 0;
 
 // ==================== 指令限幅与周期 ====================
 static constexpr float    kMaxMoveVelocity  = 10.0f;      // 平移线速度上限 m/s
-static constexpr float    kMaxRotationOmega = 5.0f;      // 自转角速度上限 rad/s
+static constexpr float    kMaxRotationOmega = 8.0f;      // 自转角速度上限 rad/s
 static constexpr float    kMaxWheelOmega    = 20.0f;     // 单轮输出轴角速度上限 rad/s（安全限）
 static constexpr uint32_t kPeriodMs         = 1;         // 控制周期
 static constexpr uint16_t kChassisTxId      = 0x200;     // 底盘控制帧 ID（4 × int16 电流）
