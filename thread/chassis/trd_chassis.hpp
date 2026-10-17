@@ -36,7 +36,7 @@ namespace instance::chassis
     constexpr auto *chassis_tx = &user_can1_msgq;
 
 #if CONFIG_USE_POWERMETER
-    constexpr uint16_t kChassisPwrMeterId = 0x01;   ///< 功率计 CAN ID
+    constexpr uint16_t kChassisPwrMeterId = 0x02;   ///< 功率计 CAN ID
     inline PowerMeter  ChassisPwrMeter {};          ///< 实测功率（seqlock）
 #endif
 

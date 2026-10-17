@@ -73,7 +73,7 @@ config TRD_CHASSIS
       设备树依赖：别名 user-can1，见 boards/*/*.overlay。
 
 config USE_POWERMETER
-    bool "Chassis power meter (Horizon, user-can1 / 0x01)"
+    bool "Chassis power meter"
     depends on TRD_CHASSIS
     default n
     select DUST_MOD_DEV_POWERMETER
