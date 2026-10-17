@@ -85,6 +85,7 @@ config USE_POWERMETER
 config TRD_GIMBAL
     bool "Gimbal control thread"
     default n
+    select ALG_LQR_ESO
     select DUST_COM_CAN
     select DUST_CTL_PID
     select DUST_FLT_LPF
@@ -95,7 +96,8 @@ config TRD_GIMBAL
     select INTER_CMD
     help
       云台控制线程（thread/gimbal/trd_gimbal.cpp）：1ms 周期，
-      yaw/pitch 各一台 DM 电机，双环 PID（角度环 → 角速度环 → 力矩）。
+      yaw/pitch 各一台 DM 电机；yaw 使用 LQR+ESO 直接输出力矩，
+      pitch 暂继续使用双环 PID（角度环 → 角速度环 → 力矩）。
 
       本线程是 user-can3 总线的所有者（Init + 收帧分发入口），
       控制帧经 topic::to_can_tx 的 user_can3_msgq 外发；

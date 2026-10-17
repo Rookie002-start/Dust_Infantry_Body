@@ -1,7 +1,7 @@
 /**
  * @file trd_gimbal.hpp
  * @author Rookie002-start
- * @brief 云台实例集合：DM 电机对象 / 双环 PID / CAN ID 表 / TX 队列
+ * @brief 云台实例集合：DM 电机对象 / yaw LQR+ESO / pitch 双环 PID / CAN ID 表
  * @version 0.2
  * @date 2026-09-16
  *
@@ -18,6 +18,7 @@
 #include "to_can_tx.hpp"
 #include "dm.hpp"
 #include "pid.hpp"
+#include "yaw_lqr_eso.hpp"
 #include <cstdint>
 
 /// 云台电机所在 bus（user-can3）；本线程是总线所有者（Init + 收帧分发）
@@ -34,11 +35,16 @@ namespace instance::gimbal
     constexpr uint16_t kPitchCanId    = 0x02;
     constexpr uint16_t kPitchMasterId = 0x11;
 
-    /// 单轴：电机 + 双环 PID（外环角度 → 内环角速度 → 力矩）
+    /// 单轴：yaw 用 LQR+ESO，pitch 暂时继续使用双环 PID
     struct Axis {
-        DmMotor       motor    {};
-        alg::pid::Pid position {};   // 外环：角度 → 角速度给定 (rad/s)
-        alg::pid::Pid omega    {};   // 内环：角速度 → 力矩给定 (N·m)
+        DmMotor motor {};
+
+        // yaw：角度/角速度状态 → 力矩
+        alg::lqr_eso::LqrEso controller {};
+
+        // pitch：角度 → 角速度 → 力矩
+        alg::pid::Pid position {};
+        alg::pid::Pid omega    {};
     };
 
     inline Axis yaw_   {};           // yaw 轴（可无限旋转）
