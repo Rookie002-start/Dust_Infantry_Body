@@ -95,7 +95,7 @@ static constexpr float kPitchPosKp   = 12.0f;
 static constexpr float kPitchPosKi   = 0.0f;
 static constexpr float kPitchPosKd   = 0.0f;
 static constexpr float kPitchOmegaKp = 2.0f;
-static constexpr float kPitchOmegaKi = 1.5f;
+static constexpr float kPitchOmegaKi = 1.0f;
 static constexpr float kPitchOmegaKd = 0.0f;
 
 // ==================== 角速度环反馈低通（alg::filter::LowPassFilter）====================
@@ -962,14 +962,14 @@ static void VofaPublish(const DmMotor::Snapshot &pitch_snap, const DmMotor::Snap
         static_cast<float>(k_uptime_get_32()),
         g_yaw_target * rad_to_deg,
         yaw_fb.ang * rad_to_deg,
-        g_wave_rate * rad_to_deg,
-        yaw_fb.omega * rad_to_deg,
+        // g_wave_rate * rad_to_deg,
+        // yaw_fb.omega * rad_to_deg,
         g_yaw_state.omega_lpf.GetOutput() * rad_to_deg,
+        yaw_snap.radian * rad_to_deg,
         // yaw_snap.omega * rad_to_deg,
-        yaw_out_torque,
+        // yaw_out_torque,
 
-        yaw_.position.GetOut() * rad_to_deg,
-        NormalizeAngle(yaw_snap.radian) * rad_to_deg,
+        // yaw_.position.GetOut() * rad_to_deg,
         // yaw_snap.torque,
 
         // g_auto_aim_yaw_angle * rad_to_deg,
