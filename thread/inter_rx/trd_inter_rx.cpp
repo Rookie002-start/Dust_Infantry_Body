@@ -5,6 +5,21 @@
  *        - 8 个分片帧（0x100 ~ 0x107）在回调里按固定偏移拼进聚合帧缓冲
  *        - 线程按发送周期读一份一致快照 → 解析 + 超时判定 → 发布 zbus
  *
+ * 本组件只负责"收"：user-can2 总线由发送侧（thread/mcu_inter）持有并完成
+ * Init + 设置收帧分发入口，这里只注册 CAN_RX_HANDLER。
+ *
+ * ⚠️ 拆帧语义：**分片之间不做跨片一致性保证**。同一聚合帧的分片在同一次发送
+ *    循环里先后到达；若某片丢失，该片对应的字节段沿用上一周期的值（最多混一个
+ *    周期），下个周期自动补齐。对周期性状态广播可接受。
+ *
+ * 消费者用法（底盘 / 云台线程，各自 1kHz 循环内）：
+ * @code
+ *   static topic::from_head::Message head{};
+ *   if (zbus_chan_read(&pub_from_head, &head, K_NO_WAIT) != 0) {
+ *       // 读失败（生产者持锁）→ 沿用上一轮值，不要清零
+ *   }
+ *   if (!head.online) { 安全降级（底盘停车） } else { 用 head.comm.chassis_vx ... }
+ * @endcode
  *
  * @version 0.6
  * @date 2026-09-15
@@ -37,7 +52,7 @@ namespace thread::inter_rx
     static constexpr inter_cmd::Dir kDir         = inter_cmd::Dir::Up;    // 本线程接收方向
     static constexpr uint8_t        kFrameLen    = inter_cmd::FrameLen(kDir);    // 61
     static constexpr uint32_t       kRxTimeoutMs = 30;   // 发送周期 1ms → 连续丢 30 轮才判离线
-    static constexpr uint32_t       kPollMs      = 1;    // 与对端发送周期一致
+    static constexpr uint32_t       kPeriodMs    = 1;    // 与对端发送周期一致
 
     // ---- ISR → 线程：聚合帧缓冲（spinlock 保证按字节不撕裂）----
     static struct
@@ -115,6 +130,10 @@ namespace thread::inter_rx
         return true;
     }
 
+    /**
+     * @brief 接收主循环（周期 kPeriodMs，绝对截止时刻计时）
+     *
+     */
     static void Task(void*, void*, void*)
     {
         uint8_t  buf[kFrameLen] {};
@@ -123,9 +142,11 @@ namespace thread::inter_rx
         bool     ever_rx     = false;
         bool     online_prev = false;
 
+        const int64_t period = k_ms_to_ticks_ceil64(kPeriodMs);
+        int64_t deadline = k_uptime_ticks() + period;   // 下一个周期的绝对截止 tick
+
         for (;;)
         {
-            const int64_t  tick  = k_uptime_get();
             const uint32_t cnt   = static_cast<uint32_t>(atomic_get(&asm_.rx_cnt));
             const bool     fresh = (cnt != last_cnt);
             const uint32_t now   = k_uptime_get_32();
@@ -158,10 +179,13 @@ namespace thread::inter_rx
                 online_prev = online;
             }
 
-            const int64_t remain = static_cast<int64_t>(kPollMs) - (k_uptime_get() - tick);
-            if (remain > 0) {
-                k_msleep(remain);
+            // 睡到绝对截止时刻；本拍已经过点（循环体 > period）就直接重排基准，不往后欠债
+            if (k_uptime_ticks() < deadline) {
+                k_sleep(K_TIMEOUT_ABS_TICKS(deadline));
+            } else {
+                deadline = k_uptime_ticks();
             }
+            deadline += period;
         }
     }
 

@@ -1,7 +1,19 @@
 /**
  * @file trd_mcu_inter.cpp
  * @author Rookie002-start
- * @brief 下板 → 上板发送线程
+ * @brief 下板 → 上板发送线程（经典 CAN 拆帧）
+ *        - 状态分片有两个来源：
+ *          ① 拉取（pull）：本板已有消费者、只发一次通道的量 → RefreshFromChannels()
+ *          ② 入队（push）：只给对端用、本地没人消费的量 → PostFrame 走 k_msgq
+ *        - 两个来源都写进同一份【本线程私有】分片缓存，聚合成 12B 聚合帧后整帧发出（0x200）
+ *
+ * ⚠️ 本线程是 user-can2 总线的所有者：初始化与收帧分发入口都在这里。
+ *    接收侧（thread/inter_rx）只注册 CAN_RX_HANDLER，**不要**再次 Can::Init() /
+ *    SetRxCallback()，否则会重复注册过滤器并覆盖分发入口。
+ *
+ * ⚠️ 总线带宽（CAN FD：仲裁段 1Mbps / 数据段 2Mbps，FDF + BRS）：
+ *    本方向 12B 一帧 ≈ 0.12ms，对端 62B 一帧 ≈ 0.34ms，一轮合计 ≈ 0.46ms
+ *    → 1ms 周期约占 46%，可行。总线忙时靠 Can::Send 的超时等待空邮箱，不直接丢帧。
  *
  * @version 0.6
  * @date 2026-09-15
@@ -125,12 +137,17 @@ namespace thread::mcu_inter
         }
     }
 
+    /**
+     * @brief 下板 → 上板发送主循环（周期 kPeriodMs，绝对截止时刻计时）
+     *
+     */
     static void Task(void*, void*, void*)
     {
+        const int64_t period = k_ms_to_ticks_ceil64(kPeriodMs);
+        int64_t deadline = k_uptime_ticks() + period;   // 下一个周期的绝对截止 tick
+
         for (;;)
         {
-            const int64_t tick_start = k_uptime_get();
-
             // 1) 拉取通道来源的分片
             RefreshFromChannels();
 
@@ -148,11 +165,13 @@ namespace thread::mcu_inter
                 SendFrame(buf, len);
             }
 
-            const int64_t elapsed = k_uptime_get() - tick_start;
-            const int64_t remain  = static_cast<int64_t>(kPeriodMs) - elapsed;
-            if (remain > 0) {
-                k_msleep(remain);
+            // 睡到绝对截止时刻；本拍已经过点（循环体 > period）就直接重排基准，不往后欠债
+            if (k_uptime_ticks() < deadline) {
+                k_sleep(K_TIMEOUT_ABS_TICKS(deadline));
+            } else {
+                deadline = k_uptime_ticks();
             }
+            deadline += period;
         }
     }
 
