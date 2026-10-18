@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include "notch.hpp"
+
 #include <cstdint>
 
 namespace alg::lqr_eso {
@@ -38,6 +40,11 @@ struct Config {
     float esoAlphaGate  = 0.0f;      // 补偿使能参考加速度门限 (rad/s²)，≤0 = 不限
     bool  esoEnable     = true;      // ESO 观测器开关
     bool  esoCompEnable = true;      // ESO 补偿接入开关（关掉仍观测）
+    float esoBlendOmegaFull = 0.0f;  // |ω| ≤ 此值：补偿权重 1 (rad/s)
+    float esoBlendOmegaOff  = 0.0f;  // |ω| ≥ 此值：补偿权重 0 (rad/s)
+    float esoBlendErrorFull = 0.0f;  // |eθ| ≤ 此值：补偿权重 1 (rad)
+    float esoBlendErrorOff  = 0.0f;  // |eθ| ≥ 此值：补偿权重 0 (rad)
+    float esoBlendLpfHz     = 20.0f; // 补偿权重平滑截止频率 (Hz)
 
     float tauBiasKi     = 0.0f;      // 偏置补偿积分增益
     float tauBiasLimit  = 0.0f;      // 偏置补偿限幅 (N·m)，0 = 不限
@@ -50,6 +57,11 @@ struct Config {
     float tauMax        = 0.0f;      // 力矩硬上限 (N·m)，min < max 才生效
     float slewRate      = 0.0f;      // 力矩斜率限制 (N·m/s)
     bool  slewEnable    = false;     // 斜率限制开关
+
+    bool  notchEnable   = false;     // 输出力矩陷波开关
+    float notchCenterHz = 9.0f;      // 陷波中心频率 (Hz)
+    float notchQ        = 3.5f;      // 陷波品质因数
+    float notchDepthDb  = 10.0f;     // 中心频率衰减量 (dB)
 };
 
 /// 反馈量
@@ -65,6 +77,7 @@ struct Reference {
     float theta = 0.0f;    // 参考角 (rad)
     float omega = 0.0f;    // 参考角速度 (rad/s)
     float alpha = 0.0f;    // 参考角加速度 (rad/s²)
+    float tauFf = 0.0f;    // 外部已知力矩前馈 (N·m)，参与模型前馈和 ESO 输入
 };
 
 /// ESO 内部状态（可观测）
@@ -98,6 +111,7 @@ struct Output {
     float tauLqr   = 0.0f;   // 前馈 + LQR
     float tauEsoRaw = 0.0f;  // ESO 原始补偿
     float tauEso   = 0.0f;   // 实际接入的 ESO 补偿
+    float esoWeight = 0.0f;  // 补偿接入权重 [0,1]
     float tauBias  = 0.0f;   // 偏置补偿
     float tauCmd   = 0.0f;   // 最终力矩指令
     bool  esoActive  = false;
@@ -132,6 +146,7 @@ public:
     {
         cfg_ = cfg;
         UpdateEsoGains();
+        notchSampleHz_ = 0.0f;
     }
 
     /// 反馈失效 / 模式切换后清历史状态，用当前测量初始化观测器
@@ -151,16 +166,22 @@ public:
 private:
     void  UpdateEsoGains();                              // 整定 ESO 增益
     void  UpdateEso(float thetaMeas, float u, float dt); // 三阶 ESO 一步观测
+    void  UpdateNotchConfig(float dt);                   // 按实际控制周期配置陷波
+    float UpdateEsoWeight(float eTheta, float omega, bool gatePass, float dt);
     float EsoComp() const;                               // 扰动估计 → 补偿力矩
     float CoulombComp(float omegaRef) const;             // 库仑摩擦前馈
 
     Config   cfg_ {};
     EsoState eso_ {};
+    alg::filter::NotchFilter torqueNotch_ {};
 
     float intTheta_    = 0.0f;
     float tauBias_     = 0.0f;
     float tauMeasFilt_ = 0.0f;
     float tauCmd_      = 0.0f;
+    float notchSampleHz_ = 0.0f;
+    float esoWeight_     = 1.0f;
+    bool  esoWeightReady_ = false;
     bool  ready_       = false;
 };
 

@@ -57,6 +57,23 @@ inline bool GatePass(float v, float limit)
 {
     return limit <= 0.0f || fabsf(v) <= limit;
 }
+
+/// 门限内权重 1，门限外权重 0，中间用 smoothstep 平滑过渡。
+inline float FadeOut(float value, float full, float off)
+{
+    if (off <= full || off <= 0.0f) {
+        return 1.0f;
+    }
+    if (value <= full) {
+        return 1.0f;
+    }
+    if (value >= off) {
+        return 0.0f;
+    }
+
+    const float x = (off - value) / (off - full);
+    return x * x * (3.0f - 2.0f * x);
+}
 } // namespace
 
 /// 载入配置并复位全部状态
@@ -77,8 +94,12 @@ void LqrEso::Reset(float theta, float omega)
     tauBias_     = 0.0f;
     tauMeasFilt_ = 0.0f;
     tauCmd_      = 0.0f;
+    notchSampleHz_ = 0.0f;
+    esoWeight_      = 1.0f;
+    esoWeightReady_ = false;
     ready_       = false;
 
+    torqueNotch_.Reset();
     UpdateEsoGains();
 }
 
@@ -112,6 +133,52 @@ void LqrEso::UpdateEso(float thetaMeas, float u, float dt)
     eso_.z1 += dt * z1Dot;
     eso_.z2 += dt * z2Dot;
     eso_.z3 += dt * z3Dot;
+}
+
+/// 陷波系数只在控制周期改变时重算，避免每拍执行三角函数。
+void LqrEso::UpdateNotchConfig(float dt)
+{
+    const float sampleHz = 1.0f / dt;
+    if (fabsf(sampleHz - notchSampleHz_) <= 0.5f) {
+        return;
+    }
+
+    const alg::filter::NotchFilter::Config notchCfg {
+        .enable   = cfg_.notchEnable,
+        .centerHz = cfg_.notchCenterHz,
+        .q        = cfg_.notchQ,
+        .depthDb  = cfg_.notchDepthDb,
+    };
+    (void)torqueNotch_.Init(notchCfg, sampleHz);
+    notchSampleHz_ = sampleHz;
+}
+
+/// 阶跃/高速运动时平滑退出 ESO 补偿，低速且接近目标后逐渐恢复。
+float LqrEso::UpdateEsoWeight(float eTheta, float omega, bool gatePass, float dt)
+{
+    float target = 1.0f;
+    if (!gatePass) {
+        target = 0.0f;
+    } else {
+        target *= FadeOut(fabsf(omega), cfg_.esoBlendOmegaFull,
+                          cfg_.esoBlendOmegaOff);
+        target *= FadeOut(fabsf(eTheta), cfg_.esoBlendErrorFull,
+                          cfg_.esoBlendErrorOff);
+    }
+
+    if (!esoWeightReady_) {
+        esoWeight_ = target;
+        esoWeightReady_ = true;
+        return esoWeight_;
+    }
+
+    const float blendHz = cfg_.esoBlendLpfHz;
+    const float alpha = blendHz > 0.0f
+                            ? Clamp(2.0f * 3.14159265f * blendHz * dt, 0.0f, 1.0f)
+                            : 1.0f;
+    esoWeight_ += alpha * (target - esoWeight_);
+    esoWeight_ = Clamp(esoWeight_, 0.0f, 1.0f);
+    return esoWeight_;
 }
 
 /// 由扰动估计折算补偿力矩 τ = -gain·z3/b0，并限幅
@@ -161,6 +228,7 @@ Output LqrEso::Calc(const Feedback& fb, const Reference& ref, float dt)
 {
     Output out {};
     dt = SanitizeDt(dt);
+    UpdateNotchConfig(dt);
 
     if (!fb.valid) {
         Reset(fb.theta, fb.omega);
@@ -194,18 +262,23 @@ Output LqrEso::Calc(const Feedback& fb, const Reference& ref, float dt)
 
     // 前馈 + LQR 反馈
     const float tauFf  = cfg_.j * ref.alpha + cfg_.b * ref.omega +
-                         CoulombComp(ref.omega);
+                         CoulombComp(ref.omega) + ref.tauFf;
     const float tauI    = -cfg_.kI * intTheta_;
     const float tauLqr = tauFf - cfg_.kTheta * eTheta - cfg_.kOmega * eOmega +
                          tauI;
 
     // ESO 扰动补偿（门限不满足时不接入）
     const float tauEsoRaw = EsoComp();
+    const bool gatePass =
+        cfg_.esoCompEnable &&
+        GatePass(fb.omega, cfg_.esoOmegaGate) &&
+        GatePass(ref.alpha, cfg_.esoAlphaGate);
+    out.esoWeight = UpdateEsoWeight(eTheta, fb.omega, gatePass, dt);
+
     float tauEso = 0.0f;
-    if (cfg_.esoCompEnable && GatePass(fb.omega, cfg_.esoOmegaGate) &&
-        GatePass(ref.alpha, cfg_.esoAlphaGate)) {
-        tauEso         = tauEsoRaw;
-        out.esoActive  = true;
+    if (gatePass && out.esoWeight > 0.0f) {
+        tauEso        = tauEsoRaw * out.esoWeight;
+        out.esoActive = true;
     }
 
     // 偏置补偿：跟随"指令 - 实测"力矩差
@@ -213,6 +286,11 @@ Output LqrEso::Calc(const Feedback& fb, const Reference& ref, float dt)
     tauBias_ = ClampAbs(tauBias_ + cfg_.tauBiasKi * (tauNoBias - tauMeasFilt_) * dt,
                         cfg_.tauBiasLimit);
     float tau = tauNoBias + tauBias_;
+
+    // 陷波放在所有闭环/前馈项合成之后、限幅之前：
+    // 1) 同时抑制 LQR、ESO、底盘前馈和偏置产生的共振激励；
+    // 2) tauCmd_ 保存陷波后的最终力矩，下一拍 ESO 使用真实输入。
+    tau = torqueNotch_.Update(tau);
 
     // 软限幅 → 硬限幅 → 斜率限制
     if (cfg_.softLimit > 0.0f) {
