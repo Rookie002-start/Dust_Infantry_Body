@@ -1,0 +1,38 @@
+menu "Watchdog supervisor"
+
+config WDT_SUPERVISOR
+	bool "Portable watchdog supervisor"
+	default n
+	select WATCHDOG
+	help
+	  Aggregate service heartbeats and feed the selected Zephyr watchdog.
+
+config WDT_SUPERVISOR_FEED_PERIOD_MS
+	int "Watchdog feed period (ms)"
+	depends on WDT_SUPERVISOR
+	default 50
+	range 50 5000
+
+config WDT_SUPERVISOR_TIMEOUT_MS
+	int "Watchdog reset timeout (ms)"
+	depends on WDT_SUPERVISOR
+	default 2000
+	range 200 60000
+
+config WDT_SUPERVISOR_HEALTH_WARMUP_MS
+	int "Watchdog health warm-up (ms)"
+	depends on WDT_SUPERVISOR
+	default 1000
+	range 200 10000
+
+config WDT_SUPERVISOR_PRE_RESET_CALLBACK
+	bool "Enable watchdog pre-reset callback"
+	depends on WDT_SUPERVISOR
+	default n
+
+config WDT_SUPERVISOR_PAUSE_IN_SLEEP
+	bool "Pause watchdog in sleep"
+	depends on WDT_SUPERVISOR
+	default n
+
+endmenu

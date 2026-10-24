@@ -230,6 +230,7 @@ endchoice
 endif # PRJ_MAIN
 
 source "Kconfig.zephyr"
+rsource "watchdog/Kconfig"
 rsource "algorithm/Kconfig"
 rsource "my_topic/Kconfig"
 rsource "inter_cmd/Kconfig"

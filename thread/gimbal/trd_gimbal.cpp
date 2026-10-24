@@ -22,6 +22,9 @@
 #include "can.hpp"
 #include "lpf.hpp"             // alg::filter::LowPassFilter（算法模块现成的一阶低通）
 #include "vofa.hpp"
+#if defined(CONFIG_WDT_SUPERVISOR)
+#include "health.hpp"
+#endif
 
 #include <algorithm>
 #include <math.h>
@@ -1095,6 +1098,9 @@ static void Task(void*, void*, void*)
 
     for (;;)
     {
+#if defined(CONFIG_WDT_SUPERVISOR)
+        wdg_health::Mark(wdg_health::Service::Gimbal);
+#endif
         static uint32_t iters = 0, overruns = 0, body_max = 0, last_ms = 0;
 
         // 从循环最顶端开始计时：这样 LOG_INF 本身的耗时也会被 body_max 抓到

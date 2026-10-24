@@ -34,6 +34,9 @@
 #include "from_head.hpp"
 #include "inter_cmd.hpp"
 #include "Irq_handlers.h"
+#if defined(CONFIG_WDT_SUPERVISOR)
+#include "health.hpp"
+#endif
 #include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
@@ -147,6 +150,9 @@ namespace thread::inter_rx
 
         for (;;)
         {
+#if defined(CONFIG_WDT_SUPERVISOR)
+            wdg_health::Mark(wdg_health::Service::InterRx);
+#endif
             const uint32_t cnt   = static_cast<uint32_t>(atomic_get(&asm_.rx_cnt));
             const bool     fresh = (cnt != last_cnt);
             const uint32_t now   = k_uptime_get_32();

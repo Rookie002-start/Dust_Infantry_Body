@@ -31,6 +31,9 @@
 #include "gimbal_to.hpp"      // pull 来源：云台通道
 #include "can.hpp"
 #include "Irq_handlers.h"
+#if defined(CONFIG_WDT_SUPERVISOR)
+#include "health.hpp"
+#endif
 #include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -148,6 +151,9 @@ namespace thread::mcu_inter
 
         for (;;)
         {
+#if defined(CONFIG_WDT_SUPERVISOR)
+            wdg_health::Mark(wdg_health::Service::McuInter);
+#endif
             // 1) 拉取通道来源的分片
             RefreshFromChannels();
 

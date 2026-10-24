@@ -67,6 +67,15 @@ foreach(_dir IN LISTS BOARD_GLOBAL_INCLUDES)
 endforeach()
 target_compile_options(app PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fno-threadsafe-statics>)
 
+# ---- (6.0) Watchdog supervisor 与 SoC 适配 --------------------------------
+if(CONFIG_WDT_SUPERVISOR)
+  zephyr_include_directories(${CMAKE_CURRENT_SOURCE_DIR}/watchdog)
+  target_sources(app PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/watchdog/supervisor.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/watchdog/health.cpp
+  )
+endif()
+
 # ---- (6.1) SEGGER RTT：补上 printf API 与头文件路径 -------------------------
 # SEGGER_RTT.c / SEGGER_RTT_zephyr.c 由 Zephyr 自带的模块胶水编译，
 # 但 SEGGER_RTT_printf() 不在其中，这里单独加进来，方便业务代码打变量：

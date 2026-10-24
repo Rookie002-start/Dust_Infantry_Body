@@ -11,6 +11,7 @@
 	chosen {
 		zephyr,console = &usart6;
 		zephyr,shell-uart = &usart6;
+		zephyr,watchdog = &iwdg;
 	};
 	leds {
 		compatible = "gpio-leds";
@@ -19,6 +20,10 @@
 			label = "LED_RED";
 		};
 	};
+};
+
+&iwdg {
+	status = "okay";
 };
 
 &usart6 {

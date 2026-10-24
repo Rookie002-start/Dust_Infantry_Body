@@ -17,6 +17,7 @@
 	chosen {
 		zephyr,console = &usart3;
 		zephyr,shell-uart = &usart3;
+		zephyr,watchdog = &iwdg;
 	};
 	leds {
 		compatible = "gpio-leds";
@@ -35,6 +36,10 @@
 			status = "okay";
 		};
 	};
+};
+
+&iwdg {
+	status = "okay";
 };
 
 /* IMU 加热器 PWM：TIM3_CH4 / PB1，PSC=24，ARR=10000（≈2.0835ms，~480Hz） */

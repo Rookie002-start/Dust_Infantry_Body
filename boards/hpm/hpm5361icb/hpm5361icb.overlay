@@ -18,6 +18,7 @@
 
     chosen {
         zephyr,console = &uart2;
+        zephyr,watchdog = &ewdg0;
     };
 
     pwm {
@@ -125,6 +126,15 @@
  * 时钟用 24M OSC：115200/921600 都能整除，且不依赖 PLL1 的状态。
  */
 &{/soc} {
+    ewdg0: watchdog@f00b0000 {
+        compatible = "hpmicro,hpm-ewdg";
+        reg = <0xf00b0000 0x4000>;
+        interrupts = <32 1>;
+        interrupt-parent = <&plic>;
+        clk-name = <CLOCK_WATCHDOG0>;
+        status = "okay";
+    };
+
     uart2: serial@f0048000 {
         compatible = "hpmicro,hpm-uart";
         reg = <0xf0048000 0x1000>;

@@ -94,6 +94,9 @@
 #include "can.hpp"
 #include "vofa.hpp"
 #include "power_ctrl.hpp"
+#if defined(CONFIG_WDT_SUPERVISOR)
+#include "health.hpp"
+#endif
 
 #include <algorithm>
 #include <math.h>
@@ -708,6 +711,9 @@ static void Task(void*, void*, void*)
 
     for (;;)
     {
+#if defined(CONFIG_WDT_SUPERVISOR)
+        wdg_health::Mark(wdg_health::Service::Chassis);
+#endif
         ReadCommand();
         ReadGimbalYaw();
         UpdateTarget();
