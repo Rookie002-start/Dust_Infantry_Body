@@ -15,6 +15,12 @@ VID="faed"
 PIDS="4870 4873"
 USB_DEV=""
 
+# Prefer the root-owned helper covered by the narrow NOPASSWD sudoers rule.
+# Falling back to `sudo tee` keeps this wrapper usable on machines without it,
+# but those machines will still ask for a password after sudo's cache expires.
+PROBE_HELPER="${HPM_PROBE_HELPER:-/usr/local/sbin/hpm-probe-usb}"
+[ -x "$PROBE_HELPER" ] || PROBE_HELPER=""
+
 # Auto-detect the USB device path
 auto_detect_device() {
     for dev in /sys/bus/usb/devices/*/; do
@@ -84,9 +90,14 @@ setup_device() {
 
     # Step 2: USB device hard reset
     echo "[wrapper] Resetting USB device..."
-    echo -n "0" | sudo tee "/sys/bus/usb/devices/$USB_DEV/authorized" >/dev/null 2>&1 || true
-    sleep 1
-    echo -n "1" | sudo tee "/sys/bus/usb/devices/$USB_DEV/authorized" >/dev/null 2>&1 || true
+    if [ -n "$PROBE_HELPER" ]; then
+        sudo "$PROBE_HELPER" reset
+        auto_detect_device >/dev/null 2>&1 || true
+    else
+        echo -n "0" | sudo tee "/sys/bus/usb/devices/$USB_DEV/authorized" >/dev/null 2>&1 || true
+        sleep 1
+        echo -n "1" | sudo tee "/sys/bus/usb/devices/$USB_DEV/authorized" >/dev/null 2>&1 || true
+    fi
     sleep 2
 
     # Step 3: Wait for device to fully re-enumerate
@@ -98,10 +109,14 @@ setup_device() {
     done
 
     # Step 4: Unbind cdc_acm from all interfaces
-    for iface_path in "/sys/bus/usb/devices/$USB_DEV/${USB_DEV}:"*; do
-        [ -d "$iface_path" ] || continue
-        release_usb_interface "$iface_path"
-    done
+    if [ -n "$PROBE_HELPER" ]; then
+        sudo "$PROBE_HELPER" unbind-cdc || true
+    else
+        for iface_path in "/sys/bus/usb/devices/$USB_DEV/${USB_DEV}:"*; do
+            [ -d "$iface_path" ] || continue
+            release_usb_interface "$iface_path"
+        done
+    fi
     sleep 0.5
 }
 
@@ -110,11 +125,15 @@ cleanup_device() {
     [ -n "$NEED_REBIND" ] || return
 
     echo "[wrapper] Rebinding cdc_acm..."
-    for iface in $NEED_REBIND; do
-        if [ ! -L "/sys/bus/usb/devices/$USB_DEV/$iface/driver" ]; then
-            echo -n "$USB_DEV:$iface" | sudo tee "/sys/bus/usb/drivers/cdc_acm/bind" >/dev/null 2>&1 || true
-        fi
-    done
+    if [ -n "$PROBE_HELPER" ]; then
+        sudo "$PROBE_HELPER" bind-cdc || true
+    else
+        for iface in $NEED_REBIND; do
+            if [ ! -L "/sys/bus/usb/devices/$USB_DEV/$iface/driver" ]; then
+                echo -n "$USB_DEV:$iface" | sudo tee "/sys/bus/usb/drivers/cdc_acm/bind" >/dev/null 2>&1 || true
+            fi
+        done
+    fi
 }
 
 # Main
