@@ -112,7 +112,7 @@
 		 <&rcc STM32_SRC_PLL1_Q FDCAN_SEL(1)>;
 	bitrate = <1000000>;
 	sample-point = <800>;
-	bitrate-data = <1000000>;
+	bitrate-data = <4000000>;
 	sample-point-data = <750>;
 	status = "okay";
 };
