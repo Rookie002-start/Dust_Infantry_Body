@@ -452,7 +452,7 @@ static void ReadCommand()
     // 自瞄生效：遥控自瞄开关 + 上板确认 PC 自瞄链路有效（VisionOk；PC 掉线/未锁定即清零）
     g_auto_aim_cmd         = (msg.comm.Switch.AutoAim != 0u) && inter_cmd::CommVisionOk(msg.comm);
     // 说明：PC 给的是"目标角 − 当前实际角"的偏差，上板已把它折算成**绝对角**再下发
-    // （折算在上板做，因为只有上板看得到 PC 帧边界，见 infantry_head thread/mcu_inter），
+    // （折算在上板做，因为只有上板看得到 PC 帧边界，见 Dust_Infantry_Head thread/mcu_inter），
     // 这里按【绝对角】用：yaw 与 IMU 世界航向同参考系，pitch 与 IMU 俯仰同参考系。
     g_auto_aim_yaw_angle   = kYawAutoSign * RdFloat(msg.autoaim.yaw_angle);
     g_auto_aim_yaw_omega   = RdFloat(msg.autoaim.yaw_omega);

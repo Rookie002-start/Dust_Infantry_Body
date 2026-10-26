@@ -46,7 +46,7 @@ endif()
 
 # ---- (5) 接入 Zephyr 构建系统 ---------------------------------------------
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
-project(temp)
+project(Dust_Infantry_Body)
 
 # ---- (6) 业务源码与系统入口 ------------------------------------------------
 # main() 由架构层 init 提供（framework/init/main.c），业务项目不再有 src/

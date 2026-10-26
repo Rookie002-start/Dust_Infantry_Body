@@ -39,8 +39,8 @@ IFACE="dap-cmsis"
 VIEW=0
 STOP=0
 DO_RESET=0
-PIDFILE="/tmp/infantry_body_rtt_openocd.pid"
-LOGFILE="/tmp/infantry_body_rtt_openocd.log"
+PIDFILE="/tmp/dust_infantry_body_rtt_openocd.pid"
+LOGFILE="/tmp/dust_infantry_body_rtt_openocd.log"
 
 usage() {
     awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "${BASH_SOURCE[0]}"
