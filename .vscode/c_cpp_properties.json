@@ -19,7 +19,7 @@
                 "/home/rookie/zephyrproject/zephyr_user",
                 "/home/rookie/zephyrproject/zephyr_user/platform/cmsis",
                 "/home/rookie/zephyrproject/zephyr_user/framework",
-                "/home/rookie/zephyrproject/custom_boards",
+                "/home/rookie/zephyrproject/zephyr_user/boards",
                 "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/arm-zephyr-eabi/include",
                 "/home/rookie/zephyrproject/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/lib/gcc/arm-zephyr-eabi/14.3.0/include"
             ],

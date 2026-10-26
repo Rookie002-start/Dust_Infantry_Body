@@ -7,10 +7,8 @@ set(ZEPHYR_USER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../zephyr_user")
 # ---- (1) 业务门禁符号 -----------------------------------------------------
 set(CONFIG_SYM PRJ_MAIN)
 
-# ---- (2) BOARD_ROOT / DTS_ROOT 指向 zephyr_user + custom_boards -----------
+# ---- (2) BOARD_ROOT / DTS_ROOT 指向共享 zephyr_user 板卡层 ----------------
 # 板卡专属路径（如 HPM 的 sdk_glue）由 boards/<board>/board.cmake 追加
-set(CUSTOM_BOARDS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../custom_boards")
-list(APPEND BOARD_ROOT "${CUSTOM_BOARDS_DIR}")
 list(APPEND BOARD_ROOT "${ZEPHYR_USER_DIR}")
 list(APPEND DTS_ROOT   "${ZEPHYR_USER_DIR}")
 list(APPEND DTS_ROOT   "${ZEPHYR_USER_DIR}/dts")
