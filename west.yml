@@ -1,0 +1,44 @@
+manifest:
+  version: "1.0"
+
+  remotes:
+    - name: zephyrproject
+      url-base: https://github.com/zephyrproject-rtos
+    - name: hpmicro
+      url-base: https://github.com/hpmicro
+    - name: rookies
+      url-base: https://github.com/Rookie002-start
+
+  defaults:
+    remote: rookies
+
+  projects:
+    - name: zephyr
+      remote: zephyrproject
+      revision: 1f6485eca25431b5ff27ce9a754218c9e559bbbb
+      import: true
+
+    - name: zephyr_user
+      repo-path: Dust_Zephyr_Tree
+      path: zephyr_user
+      revision: 68251b9608292307da1d3a02a0ec0413d0f072f3
+
+    - name: sdk_env
+      remote: hpmicro
+      path: Zephyr_HPMicro/sdk_env
+      revision: 7b8cb8bb2f04f52353a6429bffb024f0a2867876
+      submodules: true
+
+    - name: sdk_glue
+      remote: hpmicro
+      repo-path: zephyr_sdk_glue
+      path: Zephyr_HPMicro/sdk_glue
+      revision: 1756cb8fbef2334d9ad89aef08a01233f8502919
+
+    - name: sdk_glue_user
+      repo-path: Dust_Zephyr_HPMicro_Tree
+      path: Zephyr_HPMicro/sdk_glue_user
+      revision: 9a5501921d11a2ad352b44e76d1a6c7eb479a6e4
+
+  self:
+    path: projects/Dust_Infantry_Body

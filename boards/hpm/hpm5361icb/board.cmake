@@ -24,11 +24,18 @@ endif()
 
 if(DEFINED ENV{SDK_GLUE_DIR})
   set(SDK_GLUE_DIR "$ENV{SDK_GLUE_DIR}")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../Zephyr_HPMicro/sdk_glue")
+  set(SDK_GLUE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../Zephyr_HPMicro/sdk_glue")
 else()
   set(SDK_GLUE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../Zephyr_HPMicro/sdk_glue")
 endif()
-set(SDK_GLUE_USER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../Zephyr_HPMicro/sdk_glue_user")
-if(EXISTS "${SDK_GLUE_DIR}")
+if(DEFINED ENV{SDK_GLUE_USER_DIR})
+  set(SDK_GLUE_USER_DIR "$ENV{SDK_GLUE_USER_DIR}")
+else()
+  get_filename_component(_HPM_ROOT "${SDK_GLUE_DIR}/.." ABSOLUTE)
+  set(SDK_GLUE_USER_DIR "${_HPM_ROOT}/sdk_glue_user")
+endif()
+if(EXISTS "${SDK_GLUE_DIR}" AND EXISTS "${SDK_GLUE_USER_DIR}")
   list(APPEND BOARD_ROOT "${SDK_GLUE_DIR}")
   list(APPEND SOC_ROOT   "${SDK_GLUE_DIR}")
   list(APPEND DTS_ROOT   "${SDK_GLUE_DIR}")
@@ -38,6 +45,12 @@ if(EXISTS "${SDK_GLUE_DIR}")
   list(APPEND DTS_ROOT   "${SDK_GLUE_USER_DIR}")
   list(APPEND DTS_ROOT   "${SDK_GLUE_USER_DIR}/dts")
   list(APPEND ZEPHYR_EXTRA_MODULES "${SDK_GLUE_DIR}")
+else()
+  message(FATAL_ERROR
+    "HPM Zephyr support not found.\n"
+    "  SDK_GLUE_DIR=${SDK_GLUE_DIR}\n"
+    "  SDK_GLUE_USER_DIR=${SDK_GLUE_USER_DIR}\n"
+    "Run west update or set the corresponding environment variables.")
 endif()
 
 macro(app_set_runner_args)
