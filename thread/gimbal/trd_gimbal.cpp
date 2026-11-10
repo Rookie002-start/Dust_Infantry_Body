@@ -30,6 +30,9 @@
 #include <math.h>
 #include <string.h>
 #include <zephyr/kernel.h>
+#if defined(CONFIG_LATENCY_TRACE)
+#include <zephyr/sys/time_units.h>
+#endif
 #include <zephyr/logging/log.h>
 
 LOG_MODULE_REGISTER(gimbal, LOG_LEVEL_INF);
@@ -130,7 +133,7 @@ static constexpr int8_t kYawAutoSign    = -1;
 static constexpr int8_t kPitchAutoSign  = +1;
 
 static constexpr int8_t kYawMotorSign   = +1;
-static constexpr int8_t kPitchMotorSign = +1;
+static constexpr int8_t kPitchMotorSign = -1;
 #if CONFIG_TRD_GIMBAL_FB_IMU
 static constexpr int8_t kYawImuSign     = -1;
 static constexpr int8_t kPitchImuSign   = +1;
@@ -245,6 +248,18 @@ static volatile uint32_t g_pitch_rx_ms = 0;
 static uint32_t g_gimbal_version = 0; // pub_gimbal_to 版本号
 static uint32_t g_drop = 0;           // 队列满丢帧计数
 static uint32_t g_tx_fail = 0;        // CAN 发送失败计数
+
+#if defined(CONFIG_LATENCY_TRACE)
+static bool     g_trace_seen = false;
+static uint8_t  g_trace_last_seq = 0;
+static bool     g_trace_pending = false;
+static uint8_t  g_trace_seq = 0;
+static uint32_t g_trace_rx_cycles = 0;
+static uint32_t g_trace_yaw_us = 0;
+static uint32_t g_trace_pitch_us = 0;
+static bool     g_trace_yaw_done = false;
+static bool     g_trace_pitch_done = false;
+#endif
 
 // 底盘 yaw 角速度估计（rad/s，物理系）：给 kYawChassisRateFfGain 用；两路反馈都新鲜才更新
 static float g_chassis_yaw_rate = 0.0f;
@@ -458,14 +473,30 @@ static void ReadCommand()
     g_auto_aim_yaw_omega   = RdFloat(msg.autoaim.yaw_omega);
     g_auto_aim_yaw_accl    = RdFloat(msg.autoaim.yaw_accl);
     g_auto_aim_pitch_angle = kPitchAutoSign * RdFloat(msg.autoaim.pitch_angle);
-    g_auto_aim_pitch_omega = -RdFloat(msg.autoaim.pitch_omega);
-    g_auto_aim_pitch_accl  = -RdFloat(msg.autoaim.pitch_accl);
+    g_auto_aim_pitch_omega = kPitchAutoSign * RdFloat(msg.autoaim.pitch_omega);
+    g_auto_aim_pitch_accl  = kPitchAutoSign * RdFloat(msg.autoaim.pitch_accl);
 
     // 自瞄退出沿：只在"上一拍自瞄、这一拍不瞄"时为真，交给 ProcessAxis 做 yaw 的对齐沿
     static bool auto_aim_prev = false;
     const bool  auto_aim_now  = (g_auto_aim_cmd != 0u);
     g_auto_aim_off = auto_aim_prev && !auto_aim_now;
     auto_aim_prev  = auto_aim_now;
+
+#if defined(CONFIG_LATENCY_TRACE)
+    const uint8_t trace_seq = inter_cmd::CommTraceSeq(msg.comm);
+    if (auto_aim_now && msg.trace_rx_cycles != 0u &&
+        (!g_trace_seen || trace_seq != g_trace_last_seq)) {
+        g_trace_seen     = true;
+        g_trace_last_seq = trace_seq;
+        g_trace_seq      = trace_seq;
+        g_trace_rx_cycles = msg.trace_rx_cycles;
+        g_trace_pending  = true;
+        g_trace_yaw_done = false;
+        g_trace_pitch_done = false;
+    } else if (!auto_aim_now) {
+        g_trace_pending = false;
+    }
+#endif
 
     if (auto_aim_now) {
         g_yaw_stick_omega_ff = 0.0f;
@@ -482,6 +513,7 @@ static void ReadCommand()
         {
             g_pitch_cmd = g_pitch_cmd * kPitchMax;
         }
+        g_pitch_cmd = -g_pitch_cmd;
     }
 }
 
@@ -671,6 +703,37 @@ static void RequestEnable(Axis &axis)
     QueueFrame(axis, true);
 }
 
+#if defined(CONFIG_LATENCY_TRACE)
+/// 在真正调用云台电机 CAN 发送前记录本轴本地耗时分母。
+static void TraceBeforeMotorSend(uint16_t tx_id)
+{
+    if (!g_trace_pending) {
+        return;
+    }
+
+    const uint32_t elapsed =
+        k_cyc_to_us_floor32(k_cycle_get_32() - g_trace_rx_cycles);
+    if (tx_id == kYawCanId && !g_trace_yaw_done) {
+        g_trace_yaw_us   = elapsed;
+        g_trace_yaw_done = true;
+    } else if (tx_id == kPitchCanId && !g_trace_pitch_done) {
+        g_trace_pitch_us   = elapsed;
+        g_trace_pitch_done = true;
+    }
+
+    if (g_trace_yaw_done && g_trace_pitch_done) {
+        inter_cmd::TraceState trace{};
+        trace.seq        = g_trace_seq;
+        trace.valid_mask = static_cast<uint8_t>(inter_cmd::kTraceValidYaw |
+                                                inter_cmd::kTraceValidPitch);
+        trace.yaw_us     = g_trace_yaw_us;
+        trace.pitch_us   = g_trace_pitch_us;
+        inter_cmd::PostFrame(inter_cmd::FrameType::StateTrace, trace);
+        g_trace_pending = false;
+    }
+}
+#endif
+
 /**
  * @brief 外发本线程排在 user_can3_msgq 里的帧
  *
@@ -689,6 +752,9 @@ static void FlushTx()
         tx.dlc = 8;
         memcpy(tx.data, msg.data, sizeof(msg.data));
 
+#if defined(CONFIG_LATENCY_TRACE)
+        TraceBeforeMotorSend(msg.tx_id);
+#endif
         if (!can3.Send(&tx)) {
             if ((++g_tx_fail % kDropLogPeriod) == 1u) {
                 LOG_WRN("can3 send fail id=0x%02x (total %u)",
@@ -735,8 +801,10 @@ static const char *ErrName(DmErrorStatus e)
 // LQR 的参考角速度/角加速度；模型前馈 J·θ̈* + b·θ̇* 由 LQR 模块统一计算。
 // pitch 使用双环 PID：目标角速度作为内环速度给定前馈，目标角加速度按 J·θ̈* 转成力矩前馈。
 // J/b 的参考系 = 内环反馈所在的系（yaw 内环取 IMU 世界系陀螺）。
-static constexpr float kAimYawFfGain   = 1.0f;     // 整定旋钮：0 = 关掉前馈，1 = 全模型
-static constexpr float kAimPitchOmegaFfGain = 1.0f;
+static constexpr float kAimYawOmegaFfGain   = 1.0f;
+static constexpr float kAimYawAlphaFfGain   = 0.5f;
+
+static constexpr float kAimPitchOmegaFfGain = 2.0f;
 static constexpr float kAimPitchAlphaFfGain = 0.0f;
 
 
@@ -776,8 +844,8 @@ static AimYawFf YawAutoAimFeedforward()
     const float w = static_cast<float>(kYawAutoSign) * g_auto_aim_yaw_omega;   // rad/s
     const float a = static_cast<float>(kYawAutoSign) * g_auto_aim_yaw_accl;    // rad/s²
 
-    f.omega_ff = kAimYawFfGain * w;
-    f.alpha_ff = kAimYawFfGain * a;
+    f.omega_ff = kAimYawOmegaFfGain * w;
+    f.alpha_ff = kAimYawAlphaFfGain * a;
     return f;
 }
 
