@@ -806,7 +806,7 @@ static constexpr float kAimYawOmegaFfGain   = 1.0f;
 static constexpr float kAimYawAlphaFfGain   = 0.5f;
 
 static constexpr float kAimPitchOmegaFfGain = 1.0f;
-static constexpr float kAimPitchAlphaFfGain = 1.0f;
+static constexpr float kAimPitchAlphaFfGain = 0.5f;
 
 
 static constexpr float kAimPitchFfTauMax = 0.7f * kTorqueLimit; // 给 PID 留调节余量
@@ -1217,13 +1217,13 @@ static void Task(void*, void*, void*)
         yaw_aim_ff = YawAutoAimFeedforward();
         pitch_aim_ff = PitchAutoAimFeedforward();
 
-        ProcessAxis(yaw_,   g_yaw_state,   kYawMotorSign,
-                    g_yaw_target,   yaw_fb,   gimbal_stop, yaw_lost, g_auto_aim_off, yaw_snap,
-                    true, yaw_out_torque,
-                    YawOmegaFeedforward() + g_yaw_wave_rate + yaw_aim_ff.omega_ff,
-                    yaw_aim_ff.alpha_ff,
-                    g_yaw_chassis_ff,
-                    kWaveRateInject);
+        // ProcessAxis(yaw_,   g_yaw_state,   kYawMotorSign,
+        //             g_yaw_target,   yaw_fb,   gimbal_stop, yaw_lost, g_auto_aim_off, yaw_snap,
+        //             true, yaw_out_torque,
+        //             YawOmegaFeedforward() + g_yaw_wave_rate + yaw_aim_ff.omega_ff,
+        //             yaw_aim_ff.alpha_ff,
+        //             g_yaw_chassis_ff,
+        //             kWaveRateInject);
         ProcessAxis(pitch_, g_pitch_state, kPitchMotorSign,
                     g_pitch_target, pitch_fb, gimbal_stop, pitch_lost, g_auto_aim_off, pitch_snap,
                     false, pitch_out_torque,
