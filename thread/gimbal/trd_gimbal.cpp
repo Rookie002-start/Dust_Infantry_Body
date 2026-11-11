@@ -173,13 +173,14 @@ static constexpr float kYawChassisTorqueFfGain =
 static constexpr float kYawChassisRateLpfHz = 50.0f;
 
 // ==================== pitch 重力前馈 ====================
+static constexpr float kPitchGravGain = -0.785f;
 static constexpr float kPitchGravCos =  1.277f;
 static constexpr float kPitchGravSin = -0.122f;
 
 /// pitch 重力前馈力矩（关节系 N·m，抬头为正）
 static float PitchGravityFeedforward(float ang)
 {
-    return kPitchGravCos * cosf(ang) + kPitchGravSin * sinf(ang);
+    return kPitchGravGain * (kPitchGravCos * cosf(ang) + kPitchGravSin * sinf(ang));
 }
 
 // ==================== 周期计数与超时 ====================
@@ -1129,13 +1130,6 @@ static void VofaPublish(const DmMotor::Snapshot &pitch_snap, const DmMotor::Snap
         static_cast<float>(k_uptime_get_32()),
         g_yaw_target * rad_to_deg,
         yaw_fb.ang * rad_to_deg,
-        // g_auto_aim_yaw_omega * rad_to_deg,
-        // g_auto_aim_yaw_accl * rad_to_deg,
-        // g_yaw_lqr_out.tauLqr,
-        // g_yaw_lqr_out.tauEso,
-        // g_yaw_lqr_out.tauCmd,
-        // yaw_snap.radian * rad_to_deg,
-        // NormalizeAngle(yaw_snap.radian * rad_to_deg),
 
         g_pitch_target * rad_to_deg,
         pitch_fb.ang * rad_to_deg,
@@ -1147,6 +1141,8 @@ static void VofaPublish(const DmMotor::Snapshot &pitch_snap, const DmMotor::Snap
         pitch_out_torque * rad_to_deg,
         pitch_.position.GetOut(),
         pitch_.omega.GetOut(),
+        // yaw_snap.radian * rad_to_deg,
+        // NormalizeAngle(yaw_snap.radian * rad_to_deg),
     };
     static_assert(sizeof(frame) / sizeof(frame[0]) <= 16,
                   "VOFA channel limit is 16");
