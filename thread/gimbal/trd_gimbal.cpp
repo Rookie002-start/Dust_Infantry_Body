@@ -804,8 +804,8 @@ static const char *ErrName(DmErrorStatus e)
 static constexpr float kAimYawOmegaFfGain   = 1.0f;
 static constexpr float kAimYawAlphaFfGain   = 0.5f;
 
-static constexpr float kAimPitchOmegaFfGain = 2.0f;
-static constexpr float kAimPitchAlphaFfGain = 0.0f;
+static constexpr float kAimPitchOmegaFfGain = 1.0f;
+static constexpr float kAimPitchAlphaFfGain = 1.0f;
 
 
 static constexpr float kAimPitchFfTauMax = 0.7f * kTorqueLimit; // 给 PID 留调节余量
@@ -1106,6 +1106,7 @@ static void PublishAngles(const Feedback &yaw_fb, const Feedback &pitch_fb,
     g.yaw_rad      = NormalizeAngle(yaw_relative);
     g.yaw_fb_rad   = yaw_fb.ang;          // 上板要的云台反馈 yaw（模式相关：IMU 绝对角 / 编码器关节角）
     g.pitch_fb_rad = pitch_fb.ang;        // 上板要的云台反馈 pitch
+    g.pitch_fb_omega = pitch_fb.omega;    // pitch 编码器反馈角速度，供上板转发给 PC
     g.online       = online;
     (void)zbus_chan_pub(&pub_gimbal_to, &g, K_NO_WAIT);
 }
@@ -1133,8 +1134,8 @@ static void VofaPublish(const DmMotor::Snapshot &pitch_snap, const DmMotor::Snap
         // g_yaw_lqr_out.tauLqr,
         // g_yaw_lqr_out.tauEso,
         // g_yaw_lqr_out.tauCmd,
-        yaw_snap.radian * rad_to_deg,
-        NormalizeAngle(yaw_snap.radian * rad_to_deg),
+        // yaw_snap.radian * rad_to_deg,
+        // NormalizeAngle(yaw_snap.radian * rad_to_deg),
 
         g_pitch_target * rad_to_deg,
         pitch_fb.ang * rad_to_deg,
@@ -1142,6 +1143,10 @@ static void VofaPublish(const DmMotor::Snapshot &pitch_snap, const DmMotor::Snap
         g_auto_aim_pitch_angle * rad_to_deg,
         g_auto_aim_pitch_omega * rad_to_deg,
         g_auto_aim_pitch_accl  * rad_to_deg,
+        pitch_aim_ff.omega_ff  * rad_to_deg,
+        pitch_out_torque * rad_to_deg,
+        pitch_.position.GetOut(),
+        pitch_.omega.GetOut(),
     };
     static_assert(sizeof(frame) / sizeof(frame[0]) <= 16,
                   "VOFA channel limit is 16");
