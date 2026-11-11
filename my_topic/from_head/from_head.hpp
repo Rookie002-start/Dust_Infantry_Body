@@ -38,6 +38,11 @@ namespace topic::from_head
         /// 判失效的完整条件：!online || !CommLinkOk(comm)
         /// 该帧年龄（ms），供消费者使用比接收侧更细的超时阈值
         uint16_t age_ms{};
+
+#if defined(CONFIG_LATENCY_TRACE)
+        /// 该 CAN 帧进入 RX 回调时的下板高分辨率周期，仅延迟诊断使用。
+        uint32_t trace_rx_cycles{};
+#endif
     };
 }
 

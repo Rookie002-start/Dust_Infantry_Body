@@ -5,14 +5,14 @@
  *        - 状态分片有两个来源：
  *          ① 拉取（pull）：本板已有消费者、只发一次通道的量 → RefreshFromChannels()
  *          ② 入队（push）：只给对端用、本地没人消费的量 → PostFrame 走 k_msgq
- *        - 两个来源都写进同一份【本线程私有】分片缓存，聚合成 12B 聚合帧后整帧发出（0x200）
+ *        - 两个来源都写进同一份【本线程私有】分片缓存，聚合成 16B 聚合帧后整帧发出（0x200）
  *
  * ⚠️ 本线程是 user-can2 总线的所有者：初始化与收帧分发入口都在这里。
  *    接收侧（thread/inter_rx）只注册 CAN_RX_HANDLER，**不要**再次 Can::Init() /
  *    SetRxCallback()，否则会重复注册过滤器并覆盖分发入口。
  *
  * ⚠️ 总线带宽（CAN FD：仲裁段 1Mbps / 数据段 2Mbps，FDF + BRS）：
- *    本方向 12B 一帧 ≈ 0.12ms，对端 62B 一帧 ≈ 0.34ms，一轮合计 ≈ 0.46ms
+ *    本方向 16B 一帧 ≈ 0.14ms，对端 63B 一帧 ≈ 0.35ms，一轮合计 ≈ 0.49ms
  *    → 1ms 周期约占 46%，可行。总线忙时靠 Can::Send 的超时等待空邮箱，不直接丢帧。
  *
  * @version 0.6
@@ -130,11 +130,12 @@ namespace thread::mcu_inter
     /// 读失败（生产者持锁）时沿用上一轮缓存值，不清零。
     static void RefreshFromChannels()
     {
-        // GimbalState ← pub_gimbal_to（云台电机反馈 yaw + pitch）
+        // GimbalState ← pub_gimbal_to（云台电机反馈 yaw + pitch + pitch 编码器角速度）
         static topic::gimbal_to::Message g {};
         if (zbus_chan_read(&pub_gimbal_to, &g, K_NO_WAIT) == 0) {
             const inter_cmd::GimbalState st { .yaw   = g.yaw_fb_rad,
-                                              .pitch = g.pitch_fb_rad };
+                                              .pitch = g.pitch_fb_rad,
+                                              .pitch_omega = g.pitch_fb_omega };
             UpdateSlot(inter_cmd::FrameType::StateGimbal,
                        reinterpret_cast<const uint8_t *>(&st), sizeof(st));
         }

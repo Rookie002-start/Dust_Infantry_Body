@@ -53,7 +53,7 @@ namespace thread::inter_rx
     static Thread<2048> thread_{};
 
     static constexpr inter_cmd::Dir kDir         = inter_cmd::Dir::Up;    // 本线程接收方向
-    static constexpr uint8_t        kFrameLen    = inter_cmd::FrameLen(kDir);    // 61
+    static constexpr uint8_t        kFrameLen    = inter_cmd::FrameLen(kDir);    // 63
     static constexpr uint32_t       kRxTimeoutMs = 30;   // 发送周期 1ms → 连续丢 30 轮才判离线
     static constexpr uint32_t       kPeriodMs    = 1;    // 与对端发送周期一致
 
@@ -63,6 +63,11 @@ namespace thread::inter_rx
         uint8_t           data[kFrameLen];
         struct k_spinlock lock;
         atomic_t          rx_cnt;         // 每收到一整帧 +1
+#if defined(CONFIG_LATENCY_TRACE)
+        uint32_t          seq_rx_cycles[16];  // 每个诊断序号第一次到达的周期时刻
+        uint8_t           last_trace_seq;
+        bool              trace_seq_seen;
+#endif
     } asm_;
 
     // ==================== 中断上下文入口（只搬运，不解析）====================
@@ -70,8 +75,24 @@ namespace thread::inter_rx
     /// 整帧入口：CAN FD 一帧就是全部（不存在跨分片混合），整体拷进缓冲
     static void StateFrameHandler(uint8_t *data)
     {
+#if defined(CONFIG_LATENCY_TRACE)
+        const uint32_t rx_cycles = k_cycle_get_32();
+        inter_cmd::CommState comm{};
+        (void)inter_cmd::GetFrag(data, inter_cmd::Dir::Up,
+                                 inter_cmd::FrameType::StateComm, comm);
+        const uint8_t trace_seq = inter_cmd::CommTraceSeq(comm);
+#endif
         k_spinlock_key_t key = k_spin_lock(&asm_.lock);
         memcpy(asm_.data, data, sizeof(asm_.data));
+#if defined(CONFIG_LATENCY_TRACE)
+        // 500 Hz PC 帧每 2 ms 变化一次，但 CAN 1 ms 周期会重复发送同一序号。
+        // 只记录序号第一次出现的时刻，避免线程晚读时少算一拍。
+        if (!asm_.trace_seq_seen || trace_seq != asm_.last_trace_seq) {
+            asm_.seq_rx_cycles[trace_seq] = rx_cycles;
+            asm_.last_trace_seq = trace_seq;
+            asm_.trace_seq_seen = true;
+        }
+#endif
         k_spin_unlock(&asm_.lock, key);
 
         atomic_inc(&asm_.rx_cnt);
@@ -85,7 +106,8 @@ namespace thread::inter_rx
     /// 按契约布局表解析并发布（方向/偏移/长度都来自 inter_cmd.hpp 的同一张表）
     static float RdF32(const uint8_t *p) { float v{}; memcpy(&v, p, sizeof v); return v; }
 
-    static void Publish(const uint8_t *raw, bool online, uint16_t age_ms)
+    static void Publish(const uint8_t *raw, bool online, uint16_t age_ms,
+                        uint32_t rx_cycles)
     {
         topic::from_head::Message msg{};
         (void)inter_cmd::GetFrag(raw, inter_cmd::Dir::Up, inter_cmd::FrameType::StateComm,    msg.comm);
@@ -93,6 +115,11 @@ namespace thread::inter_rx
         (void)inter_cmd::GetFrag(raw, inter_cmd::Dir::Up, inter_cmd::FrameType::StateImu,     msg.imu);
         msg.online = online;
         msg.age_ms = age_ms;
+#if defined(CONFIG_LATENCY_TRACE)
+        msg.trace_rx_cycles = rx_cycles;
+#else
+        (void)rx_cycles;
+#endif
 
         // 关键：先看 flags，再看数据；打印要限流，1ms 循环里 printk 会拖慢任务
         static int64_t last_dbg = 0;
@@ -142,6 +169,9 @@ namespace thread::inter_rx
         uint8_t  buf[kFrameLen] {};
         uint32_t last_cnt    = 0;
         uint32_t last_rx_ms  = 0;
+#if defined(CONFIG_LATENCY_TRACE)
+        uint32_t last_rx_cycles = 0;
+#endif
         bool     ever_rx     = false;
         bool     online_prev = false;
 
@@ -161,6 +191,13 @@ namespace thread::inter_rx
             {
                 k_spinlock_key_t key = k_spin_lock(&asm_.lock);
                 memcpy(buf, asm_.data, sizeof(buf));
+#if defined(CONFIG_LATENCY_TRACE)
+                inter_cmd::CommState comm{};
+                (void)inter_cmd::GetFrag(asm_.data, inter_cmd::Dir::Up,
+                                         inter_cmd::FrameType::StateComm, comm);
+                last_rx_cycles =
+                    asm_.seq_rx_cycles[inter_cmd::CommTraceSeq(comm)];
+#endif
                 k_spin_unlock(&asm_.lock, key);
 
                 last_cnt   = cnt;
@@ -176,7 +213,13 @@ namespace thread::inter_rx
             {
                 const uint16_t age16 = (age > UINT16_MAX) ? UINT16_MAX
                                                           : static_cast<uint16_t>(age);
-                Publish(buf, online, age16);
+                Publish(buf, online, age16,
+#if defined(CONFIG_LATENCY_TRACE)
+                        last_rx_cycles
+#else
+                        0u
+#endif
+                );
 
                 if (online != online_prev) {
                     LOG_INF("upper board %s (age=%ums)", online ? "online" : "TIMEOUT",

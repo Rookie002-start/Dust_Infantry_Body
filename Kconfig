@@ -33,6 +33,18 @@ config PRJ_MAIN
 
 if PRJ_MAIN
 
+config LATENCY_TRACE
+    bool "Auto-aim receive to gimbal motor TX latency trace"
+    default n
+    depends on TRD_GIMBAL && TRD_MCU_INTER && TRD_INTER_RX
+    select INTER_CMD
+    help
+      临时诊断功能：配合上板 CONFIG_LATENCY_TRACE，测量 CAN RX 中断到
+      yaw/pitch 电机控制帧提交的本地耗时，并通过现有 CAN 下行帧回传上板。
+
+      上下板必须使用相同的 inter_cmd.hpp 和 CONFIG_LATENCY_TRACE=y。
+      正常固件默认关闭。测量期间不要在 500 Hz 事件路径内打印日志。
+
 # =================               TRD_CONFIG                ====================
 
 config TRD_GPIO
