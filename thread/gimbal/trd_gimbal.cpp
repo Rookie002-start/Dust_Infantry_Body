@@ -1107,7 +1107,7 @@ static void PublishAngles(const Feedback &yaw_fb, const Feedback &pitch_fb,
     g.yaw_rad      = NormalizeAngle(yaw_relative);
     g.yaw_fb_rad   = yaw_fb.ang;          // 上板要的云台反馈 yaw（模式相关：IMU 绝对角 / 编码器关节角）
     g.pitch_fb_rad = pitch_fb.ang;        // 上板要的云台反馈 pitch
-    g.pitch_fb_omega = pitch_fb.omega;    // pitch 编码器反馈角速度，供上板转发给 PC
+    g.pitch_fb_omega = g_pitch_state.omega_lpf.GetOutput();    // 滤波后pitch 编码器反馈角速度，供上板转发给 PC
     g.online       = online;
     (void)zbus_chan_pub(&pub_gimbal_to, &g, K_NO_WAIT);
 }
@@ -1133,7 +1133,7 @@ static void VofaPublish(const DmMotor::Snapshot &pitch_snap, const DmMotor::Snap
 
         g_pitch_target * rad_to_deg,
         pitch_fb.ang * rad_to_deg,
-        pitch_snap.omega * rad_to_deg,
+        g_pitch_state.omega_lpf.GetOutput() * rad_to_deg,
         g_auto_aim_pitch_angle * rad_to_deg,
         g_auto_aim_pitch_omega * rad_to_deg,
         g_auto_aim_pitch_accl  * rad_to_deg,
