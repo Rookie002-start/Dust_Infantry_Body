@@ -16,7 +16,6 @@ struct Message {
     // 云台电机反馈角（模式相关：IMU 或编码器）—— 供发送线程打包发给上板
     float yaw_fb_rad   = 0.0f;      // 电机反馈 yaw (rad)
     float pitch_fb_rad = 0.0f;      // 电机反馈 pitch (rad)
-    float pitch_fb_omega = 0.0f;    // pitch 编码器反馈角速度（关节侧，rad/s）
 
     bool  online     = false;       // 云台电机在线/无故障（供底盘降级策略）
 };

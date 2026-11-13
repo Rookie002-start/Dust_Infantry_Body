@@ -90,7 +90,7 @@ RTT、VOFA+ 和调参终端说明见 `docs/`。RTT 控制文件位于
   `ReadCommand()` 检测诊断序号变化；`FlushTx()` 在真正调用 `can3.Send()` 前，
   分别计算 yaw 和 pitch 的本地耗时。
 - 下板通过 `inter_cmd::PostFrame()` 发送 `TraceState` 分片。该分片仅存在于诊断
-  布局中，使 CAN 0x200 下行帧从 16 B 扩展为 28 B。
+  布局中，使 CAN 0x200 下行帧从 8 B 扩展为 20 B。
 
 `TraceState` 在 [`inter_cmd/inter_cmd.hpp`](inter_cmd/inter_cmd.hpp) 中定义：
 

@@ -45,8 +45,7 @@ namespace inter_cmd
         StateImu       = 0x22,   // ImuState
 
         // 下板 → 上板
-        StateGimbal    = 0x30,   // GimbalState（反馈角 + pitch 编码器角速度）
-        StateShooter   = 0x31,   // ShooterState（子弹速度）
+        StateGimbal    = 0x30,   // GimbalState（云台反馈角）
         StateTrace     = 0x32,   // TraceState（延迟诊断，仅 LATENCY_TRACE）
     };
 
@@ -137,19 +136,12 @@ namespace inter_cmd
         uint8_t pitch_omega[4];
     };
 
-    /// 状态分片（Down）：云台电机反馈角 + pitch 编码器角速度（12B，偏移 0）
+    /// 状态分片（Down）：云台电机反馈角（8B，偏移 0）
     /// ⚠️ 与 Up 方向 CommState 的 yaw/pitch 语义相反：那边是指令角，这边是电机反馈角
     struct __attribute__((packed)) GimbalState
     {
         float yaw;         // 云台电机反馈 yaw (rad)
         float pitch;       // 云台电机反馈 pitch (rad)
-        float pitch_omega; // pitch 编码器反馈角速度（关节侧，rad/s）
-    };
-
-    /// 状态分片（Down）：子弹速度（4B，偏移 12）
-    struct __attribute__((packed)) ShooterState
-    {
-        float bullet_speed;   // 单位按协议约定
     };
 
     /// 状态分片（Down）：自瞄延迟诊断，仅 CONFIG_LATENCY_TRACE=y 时进入下行帧。
@@ -173,17 +165,16 @@ namespace inter_cmd
     constexpr uint8_t kOffAutoAim = 23;   // AutoAimState 24B → 23..46
     constexpr uint8_t kOffImu     = 47;   // ImuState     16B → 47..62
 
-    constexpr uint8_t kOffGimbal  = 0;    // GimbalState   12B → 0..11
-    constexpr uint8_t kOffShooter = 12;   // ShooterState   4B → 12..15
-    constexpr uint8_t kOffTrace   = 16;   // TraceState    12B → 16..27（诊断构建）
+    constexpr uint8_t kOffGimbal  = 0;    // GimbalState    8B → 0..7
+    constexpr uint8_t kOffTrace   = 8;    // TraceState    12B → 8..19（诊断构建）
 
     // 偏移必须与结构体长度严格对齐（两端协议改错时在这里直接编译失败）
     static_assert(kOffComm + sizeof(CommState) == kOffAutoAim,
                   "CommState 长度与 kOffAutoAim 不一致（改了结构体就要同步改偏移）");
     static_assert(kOffAutoAim + sizeof(AutoAimState) == kOffImu,
                   "AutoAimState 长度与 kOffImu 不一致（改了结构体就要同步改偏移）");
-    static_assert(kOffShooter + sizeof(ShooterState) == kOffTrace,
-                  "ShooterState 长度与 kOffTrace 不一致（改了结构体就要同步改偏移）");
+    static_assert(kOffGimbal + sizeof(GimbalState) == kOffTrace,
+                  "GimbalState 长度与 kOffTrace 不一致（改了结构体就要同步改偏移）");
 
     /// 一个状态分片的布局描述
     struct StateFrag
@@ -202,7 +193,6 @@ namespace inter_cmd
         { Dir::Up,   FrameType::StateImu,     kOffImu,     sizeof(ImuState)     },
         // 下板 → 上板
         { Dir::Down, FrameType::StateGimbal,  kOffGimbal,  sizeof(GimbalState)  },
-        { Dir::Down, FrameType::StateShooter, kOffShooter, sizeof(ShooterState) },
 #if defined(CONFIG_LATENCY_TRACE)
         { Dir::Down, FrameType::StateTrace,   kOffTrace,   sizeof(TraceState)   },
 #endif
@@ -228,7 +218,7 @@ namespace inter_cmd
     }
 
     constexpr uint8_t kUpFrameLen   = FrameLen(Dir::Up);     // 63
-    constexpr uint8_t kDownFrameLen = FrameLen(Dir::Down);   // 16 / 28（诊断）
+    constexpr uint8_t kDownFrameLen = FrameLen(Dir::Down);   // 8 / 20（诊断）
 
     /// 编译期校验：分片不得越界、同方向不得重叠、类型不得重复
     constexpr bool StateFragsValid()
