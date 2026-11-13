@@ -21,6 +21,7 @@
 #include "dbg.hpp"             // 公共调参：pitch 的内外环 PID 登记给 RTT 调参终端
 #include "can.hpp"
 #include "lpf.hpp"             // alg::filter::LowPassFilter（算法模块现成的一阶低通）
+#include "notch.hpp"           // alg::filter::NotchFilter（pitch 速度反馈窄带陷波）
 #include "vofa.hpp"
 #if defined(CONFIG_WDT_SUPERVISOR)
 #include "health.hpp"
@@ -115,7 +116,7 @@ static constexpr float kPitchPosKp   = 12.0f;
 static constexpr float kPitchPosKi   = 0.0f;
 static constexpr float kPitchPosKd   = 0.0f;
 static constexpr float kPitchOmegaKp = 2.0f;
-static constexpr float kPitchOmegaKi = 1.0f;
+static constexpr float kPitchOmegaKi = 0.3f;
 static constexpr float kPitchOmegaKd = 0.0f;
 // SolidWorks 质量属性按 pitch 实际转轴（过坐标原点、平行 y 轴）做平行轴定理：
 // Iyy_cm + m·(x_cm² + z_cm²) = 0.047822582 + 4.412·(0.011756² + 0.192610²)。
@@ -123,10 +124,25 @@ static constexpr float kPitchJ = 0.212111f;   // kg·m²，关节侧
 
 // ==================== 角速度环反馈低通（alg::filter::LowPassFilter）====================
 static constexpr float kYawOmegaLpfHz   = 100.0f;
-static constexpr float kPitchOmegaLpfHz = 100.0f;
+static constexpr float kPitchOmegaLpfHz = 80.0f;
 
 // ==================== pitch 位置环 D 项低通（Hz，≤0 = 不滤）====================
 static constexpr float kPitchPosDLpfHz  = 30.0f;
+
+// pitch 自瞄角加速度前馈：先低通，再对实测约 9.5 Hz 的闭环振荡做窄带陷波。
+// 只衰减前馈中该频段的能量，低频前馈仍保持原增益。
+static constexpr float kPitchAimAlphaLpfHz          = 50.0f;
+static constexpr bool  kPitchAimAlphaNotchEnable    = false;
+static constexpr float kPitchAimAlphaNotchCenterHz  = 9.5f;
+static constexpr float kPitchAimAlphaNotchQ         = 5.0f;
+static constexpr float kPitchAimAlphaNotchDepthDb   = 8.0f;
+
+// pitch 最终力矩陷波：放在 PID、自瞄和重力前馈全部合成之后。
+// 9.0 Hz、Q=5 的组合只影响窄带，低频自瞄前馈和重力补偿基本不受影响。
+static constexpr bool  kPitchTorqueNotchEnable    = true;
+static constexpr float kPitchTorqueNotchCenterHz  = 9.0f;
+static constexpr float kPitchTorqueNotchQ         = 5.0f;
+static constexpr float kPitchTorqueNotchDepthDb   = 6.0f;
 
 // 方向极性（实测后锁定：单轴点动确认正方向）
 static constexpr int8_t kYawAutoSign    = -1;
@@ -148,7 +164,7 @@ enum class FbSource : uint8_t { Encoder, Imu };
 static constexpr FbSource kYawPosFb    = FbSource::Imu;      // yaw 外环：世界系绝对航向
 static constexpr FbSource kYawRateFb   = FbSource::Imu;      // yaw 内环：世界系陀螺 z
 static constexpr FbSource kPitchPosFb  = FbSource::Imu;      // pitch 外环：世界角
-static constexpr FbSource kPitchRateFb = FbSource::Encoder;  // pitch 内环：关节角速度
+static constexpr FbSource kPitchRateFb = FbSource::Imu;  // pitch 内环：关节角速度
 
 /// 反馈源名字（启动日志用）
 constexpr const char *FbName(FbSource s)
@@ -209,6 +225,10 @@ struct AxisState {
 
 static AxisState g_yaw_state   {};
 static AxisState g_pitch_state {};
+
+static alg::filter::LowPassFilter kPitchAimAlpha_lpf {};
+static alg::filter::NotchFilter kPitchAimAlpha_notch {};
+static alg::filter::NotchFilter g_pitch_torque_notch {};
 
 #define YAWSENSITIVE 0.008f
 
@@ -296,7 +316,7 @@ struct Feedback {
 enum class TestWave   : uint8_t { Sine, Sweep, Step };
 enum class WaveInject : uint8_t { Position, Rate };
 
-static constexpr TestWave   kTestWave   = TestWave::Step;
+static constexpr TestWave   kTestWave   = TestWave::Sweep;
 static constexpr WaveInject kWaveInject = WaveInject::Position;
 
 /// 关掉 CONFIG_WAVE_TEST 时，不要把"内环注入"当成真的打开
@@ -344,7 +364,7 @@ static float TestAmpAt(float f_hz, bool pitch_axis)
 // ==================== 固定正弦 / 扫频 ====================
 static constexpr float kSinFreqHz = 8.0f;    // 固定正弦的频点（Hz）
 static constexpr float kSweepFreqs[] = {
-    4.0f, 6.0f, 7.0f, 7.5f, 8.0f, 8.5f, 9.0f, 9.5f, 10.0f
+    3.0f, 4.0f, 6.0f, 7.0f, 7.5f, 8.0f, 8.5f, 9.0f,
 };
 static constexpr uint32_t kSweepDwellMs = 5000;
 
@@ -858,6 +878,8 @@ static AimPitchFf PitchAutoAimFeedforward()
 {
     AimPitchFf f {};
     if (g_auto_aim_cmd == 0u) {
+        kPitchAimAlpha_lpf.Reset(0.0f);
+        kPitchAimAlpha_notch.Reset(0.0f);
         return f;
     }
 
@@ -865,7 +887,8 @@ static AimPitchFf PitchAutoAimFeedforward()
     const float a = static_cast<float>(kPitchAutoSign) * g_auto_aim_pitch_accl;    // rad/s²
 
     f.omega_ff = kAimPitchOmegaFfGain * w;
-    f.alpha_ff = kAimPitchAlphaFfGain * a;
+    const float alpha_lpf = kPitchAimAlpha_lpf.Update(kAimPitchAlphaFfGain * a);
+    f.alpha_ff = kPitchAimAlpha_notch.Update(alpha_lpf);
     f.tau_ff = std::clamp(kPitchJ * f.alpha_ff,
                           -kAimPitchFfTauMax, kAimPitchFfTauMax);
     return f;
@@ -928,6 +951,7 @@ static void ProcessAxis(Axis &axis, AxisState &st, int8_t sign,
                         bool open_pos_loop = false)
 {
     const bool enabled = (snap.err == DmErrorStatus::Enable);
+    bool reset_pitch_torque_notch = false;
 
     // ---- 电机状态检测：反馈帧里的 err 半字节，只在变化的沿上报一次 ----
     if (snap.err != st.err_prev) {
@@ -962,6 +986,9 @@ static void ProcessAxis(Axis &axis, AxisState &st, int8_t sign,
                             (enabled && fb.valid &&
                              (!st.fb_valid_prev || stop_release || lost_release || auto_aim_off));
     if (align_edge) {
+        if (!yaw_axis) {
+            reset_pitch_torque_notch = true;
+        }
         if (fb.valid) {
             target_angle = fb.ang;
             // 对齐必须同时写回"指令累计量"，否则只生效 1ms：UpdateTarget() 每拍都拿 g_yaw_cmd
@@ -1004,6 +1031,9 @@ static void ProcessAxis(Axis &axis, AxisState &st, int8_t sign,
     if (!enabled || lost)
     {
         out_torque = 0.0f;
+        if (!yaw_axis) {
+            g_pitch_torque_notch.Reset(0.0f);
+        }
         if (yaw_axis) {
             g_yaw_lqr_out = {};
         }
@@ -1023,6 +1053,9 @@ static void ProcessAxis(Axis &axis, AxisState &st, int8_t sign,
     {
         // 反馈无效：给 0 力矩但保持发帧（不让电机带着陈旧角度闭环乱冲）
         out_torque = 0.0f;
+        if (!yaw_axis) {
+            g_pitch_torque_notch.Reset(0.0f);
+        }
         if (yaw_axis) {
             g_yaw_lqr_out = {};
         }
@@ -1078,8 +1111,15 @@ static void ProcessAxis(Axis &axis, AxisState &st, int8_t sign,
 
         axis.omega.SetTarget(omega_ref);
         axis.omega.SetNow(omega_fb);
+        const float torque_raw = axis.omega.Calc() + tau_ff;
+        float torque_filtered = torque_raw;
+        if (reset_pitch_torque_notch) {
+            g_pitch_torque_notch.Reset(torque_raw);
+        } else {
+            torque_filtered = g_pitch_torque_notch.Update(torque_raw);
+        }
         torque_phys =
-            std::clamp(axis.omega.Calc() + tau_ff, -kTorqueLimit, kTorqueLimit);
+            std::clamp(torque_filtered, -kTorqueLimit, kTorqueLimit);
     }
 
     const float torque = static_cast<float>(sign) * torque_phys;
@@ -1130,19 +1170,20 @@ static void VofaPublish(const DmMotor::Snapshot &pitch_snap, const DmMotor::Snap
         static_cast<float>(k_uptime_get_32()),
         g_yaw_target * rad_to_deg,
         yaw_fb.ang * rad_to_deg,
+        yaw_fb.omega * rad_to_deg,
+        g_yaw_state.omega_lpf.GetOutput() * rad_to_deg,
 
         g_pitch_target * rad_to_deg,
         pitch_fb.ang * rad_to_deg,
         g_pitch_state.omega_lpf.GetOutput() * rad_to_deg,
-        g_auto_aim_pitch_angle * rad_to_deg,
         g_auto_aim_pitch_omega * rad_to_deg,
-        g_auto_aim_pitch_accl  * rad_to_deg,
         pitch_aim_ff.omega_ff  * rad_to_deg,
-        pitch_out_torque * rad_to_deg,
+        g_auto_aim_pitch_accl * rad_to_deg,
         pitch_.position.GetOut(),
         pitch_.omega.GetOut(),
-        // yaw_snap.radian * rad_to_deg,
-        // NormalizeAngle(yaw_snap.radian * rad_to_deg),
+        pitch_aim_ff.tau_ff,
+        pitch_out_torque,
+        pitch_snap.torque,
     };
     static_assert(sizeof(frame) / sizeof(frame[0]) <= 16,
                   "VOFA channel limit is 16");
@@ -1217,13 +1258,13 @@ static void Task(void*, void*, void*)
         yaw_aim_ff = YawAutoAimFeedforward();
         pitch_aim_ff = PitchAutoAimFeedforward();
 
-        // ProcessAxis(yaw_,   g_yaw_state,   kYawMotorSign,
-        //             g_yaw_target,   yaw_fb,   gimbal_stop, yaw_lost, g_auto_aim_off, yaw_snap,
-        //             true, yaw_out_torque,
-        //             YawOmegaFeedforward() + g_yaw_wave_rate + yaw_aim_ff.omega_ff,
-        //             yaw_aim_ff.alpha_ff,
-        //             g_yaw_chassis_ff,
-        //             kWaveRateInject);
+        ProcessAxis(yaw_,   g_yaw_state,   kYawMotorSign,
+                    g_yaw_target,   yaw_fb,   gimbal_stop, yaw_lost, g_auto_aim_off, yaw_snap,
+                    true, yaw_out_torque,
+                    YawOmegaFeedforward() + g_yaw_wave_rate + yaw_aim_ff.omega_ff,
+                    yaw_aim_ff.alpha_ff,
+                    g_yaw_chassis_ff,
+                    kWaveRateInject);
         ProcessAxis(pitch_, g_pitch_state, kPitchMotorSign,
                     g_pitch_target, pitch_fb, gimbal_stop, pitch_lost, g_auto_aim_off, pitch_snap,
                     false, pitch_out_torque,
@@ -1362,6 +1403,21 @@ bool thread_init()
     // ---- 底盘 yaw 角速度估计低通（前馈用；估计量含编码器速度的量化噪声）----
     g_chassis_yaw_lpf.Init(kYawChassisRateLpfHz, kDt);
 
+    kPitchAimAlpha_lpf.Init(kPitchAimAlphaLpfHz, kDt);
+    const alg::filter::NotchFilter::Config pitch_aim_alpha_notch_cfg {
+        .enable   = kPitchAimAlphaNotchEnable,
+        .centerHz = kPitchAimAlphaNotchCenterHz,
+        .q        = kPitchAimAlphaNotchQ,
+        .depthDb  = kPitchAimAlphaNotchDepthDb,
+    };
+    kPitchAimAlpha_notch.Init(pitch_aim_alpha_notch_cfg, 1.0f / kDt);
+    const alg::filter::NotchFilter::Config pitch_torque_notch_cfg {
+        .enable   = kPitchTorqueNotchEnable,
+        .centerHz = kPitchTorqueNotchCenterHz,
+        .q        = kPitchTorqueNotchQ,
+        .depthDb  = kPitchTorqueNotchDepthDb,
+    };
+    g_pitch_torque_notch.Init(pitch_torque_notch_cfg, 1.0f / kDt);
     // ---- 上电使能：DM 上电默认失能，先各排一帧 Enable 命令帧 ----
     // 排队即可（本线程是 can3 所有者，第一拍 FlushTx 就发出去）；后面电机没进使能态
     // 时控制环还会每 kEnableResendTicks 补发，所以这里发一次就够。
