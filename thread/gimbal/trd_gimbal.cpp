@@ -112,10 +112,10 @@ static constexpr float kYawNotchDepthDb   = 6.0f;
 
 // ==================== pitch PID 初值（本次保持原控制结构与参数） ====================
 // pitch encoder反馈:out_kp = 12.0f out_ki = 0.0f in_kp = 2.0f in_ki = 1.0f
-static constexpr float kPitchPosKp   = 12.0f;
+static constexpr float kPitchPosKp   = 18.0f;
 static constexpr float kPitchPosKi   = 0.0f;
 static constexpr float kPitchPosKd   = 0.0f;
-static constexpr float kPitchOmegaKp = 2.0f;
+static constexpr float kPitchOmegaKp = 1.0f;
 static constexpr float kPitchOmegaKi = 0.3f;
 static constexpr float kPitchOmegaKd = 0.0f;
 // SolidWorks 质量属性按 pitch 实际转轴（过坐标原点、平行 y 轴）做平行轴定理：
@@ -132,17 +132,17 @@ static constexpr float kPitchPosDLpfHz  = 30.0f;
 // pitch 自瞄角加速度前馈：先低通，再对实测约 9.5 Hz 的闭环振荡做窄带陷波。
 // 只衰减前馈中该频段的能量，低频前馈仍保持原增益。
 static constexpr float kPitchAimAlphaLpfHz          = 50.0f;
-static constexpr bool  kPitchAimAlphaNotchEnable    = false;
-static constexpr float kPitchAimAlphaNotchCenterHz  = 9.5f;
-static constexpr float kPitchAimAlphaNotchQ         = 5.0f;
+static constexpr bool  kPitchAimAlphaNotchEnable    = true;
+static constexpr float kPitchAimAlphaNotchCenterHz  = 12.0f;
+static constexpr float kPitchAimAlphaNotchQ         = 3.0f;
 static constexpr float kPitchAimAlphaNotchDepthDb   = 8.0f;
 
 // pitch 最终力矩陷波：放在 PID、自瞄和重力前馈全部合成之后。
 // 9.0 Hz、Q=5 的组合只影响窄带，低频自瞄前馈和重力补偿基本不受影响。
 static constexpr bool  kPitchTorqueNotchEnable    = true;
-static constexpr float kPitchTorqueNotchCenterHz  = 9.0f;
-static constexpr float kPitchTorqueNotchQ         = 5.0f;
-static constexpr float kPitchTorqueNotchDepthDb   = 6.0f;
+static constexpr float kPitchTorqueNotchCenterHz  = 8.5f;
+static constexpr float kPitchTorqueNotchQ         = 4.0f;
+static constexpr float kPitchTorqueNotchDepthDb   = 8.0f;
 
 // 方向极性（实测后锁定：单轴点动确认正方向）
 static constexpr int8_t kYawAutoSign    = -1;
@@ -179,6 +179,10 @@ static_assert(kYawPosFb == FbSource::Encoder && kYawRateFb == FbSource::Encoder 
 #endif
 
 // ==================== 底盘 yaw 角速度前馈 ====================
+// 诊断总开关：关闭后 yaw 的底盘/摇杆/自瞄角速度与角加速度前馈、以及底盘力矩前馈
+// 都不进入 LQR。反馈、LQR、ESO 和最终力矩限幅保持不变。
+static constexpr bool kYawFeedforwardEnable = true;
+
 static constexpr float kYawChassisRateFfGain =
     (kYawPosFb == FbSource::Imu && kYawRateFb == FbSource::Encoder) ? -1.0f : 0.0f;
 // 两个环都取 IMU 时，θ 已经是世界角。底盘相对运动中的粘性项 B·ω_chassis
@@ -316,7 +320,7 @@ struct Feedback {
 enum class TestWave   : uint8_t { Sine, Sweep, Step };
 enum class WaveInject : uint8_t { Position, Rate };
 
-static constexpr TestWave   kTestWave   = TestWave::Sweep;
+static constexpr TestWave   kTestWave   = TestWave::Step;
 static constexpr WaveInject kWaveInject = WaveInject::Position;
 
 /// 关掉 CONFIG_WAVE_TEST 时，不要把"内环注入"当成真的打开
@@ -333,7 +337,7 @@ static constexpr float kTestTorqueBudget = 0.5f * kTorqueLimit;
 // 低频段的幅值上限：位置注入是 rad，速率注入是 rad/s。pitch 行程短且 J 更大，单独限幅。
 static constexpr float kYawTestAmpPos    = 0.20f;
 static constexpr float kYawTestAmpRate   = 2.0f;
-static constexpr float kPitchTestAmpPos  = 0.12f;
+static constexpr float kPitchTestAmpPos  = 0.20f;
 static constexpr float kPitchTestAmpRate = 0.15f;
 
 // 阶跃（方波）参数：看 VOFA 的"给定 vs 反馈"读上升时间/超调/稳态误差
@@ -1167,21 +1171,25 @@ static void VofaPublish(const DmMotor::Snapshot &pitch_snap, const DmMotor::Snap
 
     const float frame[] = {
         static_cast<float>(k_uptime_get_32()),
-        g_yaw_target * rad_to_deg,
-        yaw_fb.ang * rad_to_deg,
-        yaw_fb.omega * rad_to_deg,
-        g_yaw_state.omega_lpf.GetOutput() * rad_to_deg,
+        // g_yaw_target * rad_to_deg,
+        // yaw_fb.ang * rad_to_deg,
+        // yaw_fb.omega * rad_to_deg,
 
         g_pitch_target * rad_to_deg,
         pitch_fb.ang * rad_to_deg,
+        pitch_fb.omega * rad_to_deg,
+        pitch_out_torque,
         g_pitch_state.omega_lpf.GetOutput() * rad_to_deg,
+        pitch_snap.angle * rad_to_deg,
+        pitch_snap.omega * rad_to_deg,
         g_auto_aim_pitch_omega * rad_to_deg,
         pitch_aim_ff.omega_ff  * rad_to_deg,
         g_auto_aim_pitch_accl * rad_to_deg,
         pitch_.position.GetOut(),
         pitch_.omega.GetOut(),
         pitch_aim_ff.tau_ff,
-        pitch_out_torque,
+
+        PitchGravityFeedforward(pitch_fb.ang),
         pitch_snap.torque,
     };
     static_assert(sizeof(frame) / sizeof(frame[0]) <= 16,
@@ -1257,12 +1265,21 @@ static void Task(void*, void*, void*)
         yaw_aim_ff = YawAutoAimFeedforward();
         pitch_aim_ff = PitchAutoAimFeedforward();
 
+        const float yaw_omega_ff =
+            kYawFeedforwardEnable
+                ? YawOmegaFeedforward() + g_yaw_wave_rate + yaw_aim_ff.omega_ff
+                : 0.0f;
+        const float yaw_alpha_ff =
+            kYawFeedforwardEnable ? yaw_aim_ff.alpha_ff : 0.0f;
+        const float yaw_tau_ff =
+            kYawFeedforwardEnable ? g_yaw_chassis_ff : 0.0f;
+
         ProcessAxis(yaw_,   g_yaw_state,   kYawMotorSign,
                     g_yaw_target,   yaw_fb,   gimbal_stop, yaw_lost, g_auto_aim_off, yaw_snap,
                     true, yaw_out_torque,
-                    YawOmegaFeedforward() + g_yaw_wave_rate + yaw_aim_ff.omega_ff,
-                    yaw_aim_ff.alpha_ff,
-                    g_yaw_chassis_ff,
+                    yaw_omega_ff,
+                    yaw_alpha_ff,
+                    yaw_tau_ff,
                     kWaveRateInject);
         ProcessAxis(pitch_, g_pitch_state, kPitchMotorSign,
                     g_pitch_target, pitch_fb, gimbal_stop, pitch_lost, g_auto_aim_off, pitch_snap,
