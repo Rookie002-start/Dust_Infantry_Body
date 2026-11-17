@@ -1,13 +1,11 @@
 /**
  * @file trd_gimbal.hpp
  * @author Rookie002-start
- * @brief 云台实例集合：DM 电机对象 / yaw LQR+ESO / pitch 双环 PID / CAN ID 表
+ * @brief 云台实例集合：DM 电机 / LQR+ESO / CAN ID
  * @version 0.2
  * @date 2026-09-16
  *
- * 只被 thread/gimbal/trd_gimbal.cpp 使用：这里只放"实例与常量"。
- * CAN_RX_HANDLER 注册放在 .cpp —— 放在头文件里一旦被多处包含，
- * 会在 .can_rx3 段里重复登记同一个 ID，而且成员函数指针不能做段初值。
+ * 仅由 trd_gimbal.cpp 使用；CAN 接收注册放在 .cpp 中。
  *
  * @copyright Copyright (c) 2026
  */
@@ -17,7 +15,6 @@
 #include "Irq_handlers.h"
 #include "to_can_tx.hpp"
 #include "dm.hpp"
-#include "pid.hpp"
 #include "yaw_lqr_eso.hpp"
 #include <cstdint>
 
@@ -35,16 +32,10 @@ namespace instance::gimbal
     constexpr uint16_t kPitchCanId    = 0x02;
     constexpr uint16_t kPitchMasterId = 0x11;
 
-    /// 单轴：yaw 用 LQR+ESO，pitch 暂时继续使用双环 PID
+    /// 单轴：角度/角速度状态 → LQR+ESO 力矩
     struct Axis {
         DmMotor motor {};
-
-        // yaw：角度/角速度状态 → 力矩
         alg::lqr_eso::LqrEso controller {};
-
-        // pitch：角度 → 角速度 → 力矩
-        alg::pid::Pid position {};
-        alg::pid::Pid omega    {};
     };
 
     inline Axis yaw_   {};           // yaw 轴（可无限旋转）
