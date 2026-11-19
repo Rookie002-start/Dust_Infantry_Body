@@ -69,8 +69,8 @@ static constexpr uint32_t kPeriodMs = 1;
 static constexpr float    kDt      = static_cast<float>(kPeriodMs) / 1000.0f;
 
 // ==================== 机械与限幅 ====================
-static constexpr float kPitchMin    = -0.310f;                    // 关节侧 rad，抬头为正
-static constexpr float kPitchMax    =  0.350f;
+static constexpr float kPitchMin    = -0.300f;                    // 关节侧 rad，抬头为正
+static constexpr float kPitchMax    =  0.300f;
 static constexpr float kJointRatio  = 1.0f;                      // 1:1 减速比（已确认）
 static constexpr float kMotorVmax   = 30.0f;                      // 电机侧角速度上限 rad/s（DM VMAX）
 // 电机/协议力矩标定：必须等于电机手册的 TMAX（反馈力矩解码与 MIT 帧编码都用它）
@@ -91,12 +91,14 @@ static constexpr float kYawOmegaKp   = 2.0f;
 static constexpr float kYawOmegaKi   = 3.0f;
 static constexpr float kYawOmegaKd   = 0.0f;
 
-static constexpr float kPitchPosKp   = 12.0f;
+static constexpr float kPitchPosKp   = 18.0f;
 static constexpr float kPitchPosKi   = 0.0f;
 static constexpr float kPitchPosKd   = 0.0f;
-static constexpr float kPitchOmegaKp = 2.0f;
+static constexpr float kPitchOmegaKp = 1.0f;
 static constexpr float kPitchOmegaKi = 1.0f;
 static constexpr float kPitchOmegaKd = 0.0f;
+// pitch 辨识模型 J·θ̈ + B·θ̇ = τ 的关节侧参数（与 LQR 分支一致）。
+static constexpr float kPitchJ = 0.029841888f;   // kg·m²
 
 // ==================== 角速度环反馈低通（alg::filter::LowPassFilter）====================
 static constexpr float kYawOmegaLpfHz   = 50.0f;
@@ -105,13 +107,15 @@ static constexpr float kPitchOmegaLpfHz = 100.0f;
 // ==================== 位置环 D 项低通（Hz，≤0 = 不滤）====================
 static constexpr float kYawPosDLpfHz    = 30.0f;
 static constexpr float kPitchPosDLpfHz  = 30.0f;
+// pitch 自瞄角加速度先低通，避免把参考的离散差分噪声直接变成力矩前馈。
+static constexpr float kPitchAimAlphaLpfHz = 50.0f;
 
 // 方向极性（实测后锁定：单轴点动确认正方向）
 static constexpr int8_t kYawAutoSign    = -1;
-static constexpr int8_t kPitchAutoSign  = -1;
+static constexpr int8_t kPitchAutoSign  = +1;
 
 static constexpr int8_t kYawMotorSign   = +1;
-static constexpr int8_t kPitchMotorSign = +1;
+static constexpr int8_t kPitchMotorSign = -1;
 #if CONFIG_TRD_GIMBAL_FB_IMU
 static constexpr int8_t kYawImuSign     = -1;
 static constexpr int8_t kPitchImuSign   = +1;
@@ -126,7 +130,7 @@ enum class FbSource : uint8_t { Encoder, Imu };
 static constexpr FbSource kYawPosFb    = FbSource::Imu;      // yaw 外环：世界系绝对航向
 static constexpr FbSource kYawRateFb   = FbSource::Imu;      // yaw 内环：世界系陀螺 z
 static constexpr FbSource kPitchPosFb  = FbSource::Imu;      // pitch 外环：世界角
-static constexpr FbSource kPitchRateFb = FbSource::Encoder;  // pitch 内环：关节角速度
+static constexpr FbSource kPitchRateFb = FbSource::Imu;      // pitch 内环：世界系陀螺
 
 /// 反馈源名字（启动日志用）
 constexpr const char *FbName(FbSource s)
@@ -147,13 +151,14 @@ static constexpr float kYawChassisRateFfGain =
 static constexpr float kYawChassisRateLpfHz = 50.0f;
 
 // ==================== pitch 重力前馈 ====================
+static constexpr float kPitchGravGain = -0.785f;
 static constexpr float kPitchGravCos =  1.277f;
 static constexpr float kPitchGravSin = -0.122f;
 
 /// pitch 重力前馈力矩（关节系 N·m，抬头为正）
 static float PitchGravityFeedforward(float ang)
 {
-    return kPitchGravCos * cosf(ang) + kPitchGravSin * sinf(ang);
+    return kPitchGravGain * (kPitchGravCos * cosf(ang) + kPitchGravSin * sinf(ang));
 }
 
 // ==================== 周期计数与超时 ====================
@@ -422,11 +427,11 @@ static void ReadCommand()
     // （折算在上板做，因为只有上板看得到 PC 帧边界，见 infantry_head thread/mcu_inter），
     // 这里按【绝对角】用：yaw 与 IMU 世界航向同参考系，pitch 与 IMU 俯仰同参考系。
     g_auto_aim_yaw_angle   = kYawAutoSign * RdFloat(msg.autoaim.yaw_angle);
-    g_auto_aim_yaw_omega   = RdFloat(msg.autoaim.yaw_omega);
-    g_auto_aim_yaw_accl    = RdFloat(msg.autoaim.yaw_accl);
+    g_auto_aim_yaw_omega   = kYawAutoSign * RdFloat(msg.autoaim.yaw_omega);
+    g_auto_aim_yaw_accl    = kYawAutoSign * RdFloat(msg.autoaim.yaw_accl);
     g_auto_aim_pitch_angle = kPitchAutoSign * RdFloat(msg.autoaim.pitch_angle);
-    g_auto_aim_pitch_omega = RdFloat(msg.autoaim.pitch_omega);
-    g_auto_aim_pitch_accl  = RdFloat(msg.autoaim.pitch_accl);
+    g_auto_aim_pitch_omega = kPitchAutoSign * RdFloat(msg.autoaim.pitch_omega);
+    g_auto_aim_pitch_accl  = kPitchAutoSign * RdFloat(msg.autoaim.pitch_accl);
 
     // 自瞄退出沿：只在"上一拍自瞄、这一拍不瞄"时为真，交给 ProcessAxis 做 yaw 的对齐沿
     static bool auto_aim_prev = false;
@@ -449,6 +454,7 @@ static void ReadCommand()
         {
             g_pitch_cmd = g_pitch_cmd * kPitchMax;
         }
+        g_pitch_cmd = -g_pitch_cmd;
     }
 }
 
@@ -691,46 +697,86 @@ static const char *ErrName(DmErrorStatus e)
 
 // ==================== 单轴控制 ====================
 
-// ==================== 自瞄 yaw 前馈（模型逆动力学）====================
-// 辨识模型（yaw 轴）：J·θ̈ + b·θ̇ = τ，J = 0.048 kg·m²、b = 0.04 N·m·s/rad。
-// 自瞄时 PC 下发目标的角速度 θ̇*（yaw_omega）和角加速度 θ̈*（yaw_accl），用它做两路前馈：
-//   · 速度前馈：ω_ref += θ̇*            —— 目标本来就在动，直接告诉内环，位置环只修残差
-//   · 力矩前馈：τ_ff = J·θ̈* + b·θ̇*     —— 把已知的惯量/阻尼负载直接补上，PID 不用靠积分去猜
-// 目前只给 yaw（pitch 暂不做）。J/b 的参考系 = 内环反馈所在的系（yaw 内环取 IMU 世界系陀螺）。
-static constexpr float kAimYawJ        = 0.048f;   // kg·m²
-static constexpr float kAimYawB        = 0.04f;    // N·m·s/rad
-static constexpr float kAimYawFfGain   = 1.0f;     // 整定旋钮：0 = 关掉前馈，1 = 全模型
-static constexpr float kAimYawFfTauMax = 0.7f * kTorqueLimit;   // 力矩前馈限幅（给 PID 留余量）
+// ==================== 自瞄参考前馈 ====================
+// 与 LQR 版本一致，把自瞄目标的角速度 θ̇*、角加速度 θ̈* 作为参考前馈：
+//   · 角速度前馈：ω_ref += θ̇*，让位置环只修跟踪残差；
+//   · 力矩前馈：按模型 J·θ̈ + b·θ̇ = τ 预补偿已知惯量和阻尼负载。
+// PID 结构、增益和算法都不改，前馈只在 PID 输出之外叠加。
+// J/b 的参考系与对应轴的内环反馈一致（yaw 内环取 IMU 世界系陀螺）。
+static constexpr float kAimYawJ           = 0.048f;   // kg·m²
+static constexpr float kAimYawB           = 0.040f;   // N·m·s/rad
+static constexpr float kAimYawOmegaFfGain = 1.0f;
+static constexpr float kAimYawAlphaFfGain = 0.5f;
+static constexpr float kAimYawFfTauMax    = 0.7f * kTorqueLimit;
 
-/// 自瞄 yaw 前馈量（物理系：逆时针为正），直接喂给 ProcessAxis 的两个前馈入口
-struct AimYawFf {
+static constexpr float kAimPitchOmegaFfGain = 1.0f;
+static constexpr float kAimPitchAlphaFfGain = 0.7f;
+static constexpr float kAimPitchFfTauMax    = 0.7f * kTorqueLimit;
+static constexpr float kAimPitchB           = 0.210f;   // N·m·s/rad
+
+/// 自瞄参考前馈（物理系：yaw 逆时针为正，pitch 抬头为正）。
+struct AimFeedforward {
     float omega_ff = 0.0f;   // rad/s：加到内环角速度给定
-    float tau_ff   = 0.0f;   // N·m  ：加到内环力矩输出
+    float alpha_ff = 0.0f;   // rad/s²：用于模型力矩前馈
 };
 
-static AimYawFf yaw_aim_ff = { 0.0f, 0.0f };
+static AimFeedforward g_yaw_aim_ff {};
+static AimFeedforward g_pitch_aim_ff {};
+static alg::filter::LowPassFilter g_pitch_aim_alpha_lpf {};
 
 /**
- * @brief 算本拍自瞄 yaw 前馈（速度 + 力矩）
+ * @brief 算本拍自瞄 yaw 的角速度、角加速度参考前馈
  *
- * 只在自瞄生效（g_auto_aim_cmd，已含 VisionOk）时给；其余情况返回 0 —— 前馈是直接推力矩的
- * 一路，绝不能带陈旧值。符号与角度一致：PC 下发的 ω/α 是那个角度的导数，用同一个
- * kYawAutoSign 折到物理系（与位置环反馈 fb.ang 同系）。
+ * 只在自瞄生效（g_auto_aim_cmd，已含 VisionOk）时给；其余情况返回 0，绝不带陈旧值。
+ * PC 下发的 ω/α 是角度的导数，和角度一样使用 kYawAutoSign 折到物理系。
  */
-static AimYawFf YawAutoAimFeedforward()
+static AimFeedforward YawAutoAimFeedforward()
 {
-    AimYawFf f {};
     if (g_auto_aim_cmd == 0u) {
-        return f;
+        return {};
     }
 
-    const float w = static_cast<float>(kYawAutoSign) * g_auto_aim_yaw_omega;   // rad/s
-    const float a = static_cast<float>(kYawAutoSign) * g_auto_aim_yaw_accl;    // rad/s²
+    const float w = g_auto_aim_yaw_omega;
+    const float a = g_auto_aim_yaw_accl;
+    return {
+        .omega_ff = kAimYawOmegaFfGain * w,
+        .alpha_ff = kAimYawAlphaFfGain * a,
+    };
+}
 
-    f.omega_ff = kAimYawFfGain * w;
-    f.tau_ff   = std::clamp(kAimYawFfGain * (kAimYawJ * a + kAimYawB * w),
-                            -kAimYawFfTauMax, kAimYawFfTauMax);
-    return f;
+/**
+ * @brief 算本拍自瞄 pitch 的角速度、角加速度参考前馈
+ *
+ * pitch 内环与 LQR 一样使用上板 IMU 世界系角速度，角速度前馈直接叠加到 PID 内环给定。
+ * 角加速度先低通，再由 J·α 转成力矩前馈，避免高频参考噪声和 PID 抢输出。
+ */
+static AimFeedforward PitchAutoAimFeedforward()
+{
+    if (g_auto_aim_cmd == 0u) {
+        g_pitch_aim_alpha_lpf.Reset(0.0f);
+        return {};
+    }
+
+    const float w = g_auto_aim_pitch_omega;
+    const float a = g_auto_aim_pitch_accl;
+    return {
+        .omega_ff = kAimPitchOmegaFfGain * w,
+        .alpha_ff = g_pitch_aim_alpha_lpf.Update(kAimPitchAlphaFfGain * a),
+    };
+}
+
+/// yaw 模型逆动力学力矩前馈。
+static float YawAutoAimTorqueFeedforward(const AimFeedforward &ff)
+{
+    return std::clamp(kAimYawJ * ff.alpha_ff + kAimYawB * ff.omega_ff,
+                      -kAimYawFfTauMax, kAimYawFfTauMax);
+}
+
+/// pitch 模型逆动力学力矩前馈。
+static float PitchAutoAimTorqueFeedforward(const AimFeedforward &ff)
+{
+    return std::clamp(kPitchJ * ff.alpha_ff + kAimPitchB * ff.omega_ff,
+                      -kAimPitchFfTauMax, kAimPitchFfTauMax);
 }
 
 /**
@@ -770,8 +816,9 @@ static float YawOmegaFeedforward()
  *                         让位置环只修残差（见 kYawStickRateGain）。
  *                     两项都与"外环 PID 输出"同参考系、都是加性项，所以在同一处相加等价
  *                     （clamp 放在加法之后，前馈也不能把给定推出限幅）。
- * @param tau_ff       内环力矩前馈 (N·m，关节系，抬头为正)：重力这类"已知负载力矩"直接
- *                     叠加在内环输出上。和 PID 输出一起限幅（不能绕过 kTorqueLimit）
+ * @param tau_ff       内环力矩前馈 (N·m，关节系，抬头为正)：重力、模型逆动力学这类
+ *                     "已知负载力矩"直接叠加在内环输出上。和 PID 输出一起限幅
+ *                     （不能绕过 kTorqueLimit）
  */
 static void ProcessAxis(Axis &axis, AxisState &st, int8_t sign,
                         float &target_angle, const Feedback &fb,
@@ -974,12 +1021,12 @@ static void VofaPublish(const DmMotor::Snapshot &pitch_snap, const DmMotor::Snap
 
         // g_auto_aim_yaw_angle * rad_to_deg,
         // g_auto_aim_pitch_angle * rad_to_deg,
-        // yaw_aim_ff.omega_ff * rad_to_deg,   
-        // yaw_aim_ff.tau_ff,                 
+        // g_yaw_aim_ff.omega_ff * rad_to_deg,
+        // YawAutoAimTorqueFeedforward(g_yaw_aim_ff),
         // g_auto_aim_yaw_accl,            
 
-        // g_pitch_target * rad_to_deg,
-        // pitch_fb.ang * rad_to_deg,
+        g_pitch_target * rad_to_deg,
+        pitch_fb.ang * rad_to_deg,
         // pitch_fb.omega * rad_to_deg,
         // pitch_.position.GetOut() * rad_to_deg,
         // pitch_snap.radian * rad_to_deg,
@@ -1033,12 +1080,13 @@ static void Task(void*, void*, void*)
         const auto yaw_snap   = yaw_.motor.ReadAll();
         const auto pitch_snap = pitch_.motor.ReadAll();
 
-        // 上板 IMU 反馈：yaw 内外环都用；pitch 走编码器（照样读出来交给 ReadFeedback 按源挑，
-        // IMU 那套代码没编进来时是空对象）
+        // 上板 IMU 反馈：yaw/pitch 内外环都按同一世界系坐标取角与角速度。
+        // IMU 那套代码没编进来时返回空对象，由 ReadFeedback 按反馈源组合。
         const Feedback yaw_imu_fb   = ReadImuFeedbackOrNone(true);
         const Feedback pitch_imu_fb = ReadImuFeedbackOrNone(false);
 
-        // 按每轴反馈源组装：yaw = 世界系（IMU 绝对角 + 陀螺 z），pitch = 关节系（编码器）
+        // 按每轴反馈源组装，并统一到 LQR 使用的物理坐标：
+        // yaw 逆时针为正，pitch 抬头为正。
         const Feedback yaw_fb   = ReadFeedback(yaw_snap,   yaw_imu_fb,   true);
         const Feedback pitch_fb = ReadFeedback(pitch_snap, pitch_imu_fb, false);
 
@@ -1049,19 +1097,22 @@ static void Task(void*, void*, void*)
         // 底盘 yaw 角速度估计（前馈用）：ω_底盘 = ω_云台(世界系 IMU) − ω_关节(yaw 编码器)
         UpdateChassisYawRate(yaw_imu_fb, yaw_snap, yaw_lost);
 
-        // 自瞄 yaw 前馈（速度 + 力矩，模型逆动力学）：只给 yaw，见 YawAutoAimFeedforward
-        yaw_aim_ff = YawAutoAimFeedforward();
+        // 双轴自瞄参考前馈：ω 进内环给定，α 经模型惯量转成力矩前馈。
+        g_yaw_aim_ff = YawAutoAimFeedforward();
+        g_pitch_aim_ff = PitchAutoAimFeedforward();
 
         ProcessAxis(yaw_,   g_yaw_state,   kYawMotorSign,
                     g_yaw_target,   yaw_fb,   gimbal_stop, yaw_lost, g_auto_aim_off, yaw_snap,
                     true, yaw_out_torque,
-                    YawOmegaFeedforward() + g_wave_rate + yaw_aim_ff.omega_ff,
-                    yaw_aim_ff.tau_ff,
+                    YawOmegaFeedforward() + g_wave_rate + g_yaw_aim_ff.omega_ff,
+                    YawAutoAimTorqueFeedforward(g_yaw_aim_ff),
                     kWaveRateInject);
         ProcessAxis(pitch_, g_pitch_state, kPitchMotorSign,
                     g_pitch_target, pitch_fb, gimbal_stop, pitch_lost, g_auto_aim_off, pitch_snap,
-                    false, pitch_out_torque, 0.0f,
-                    PitchGravityFeedforward(pitch_fb.ang));
+                    false, pitch_out_torque,
+                    g_pitch_aim_ff.omega_ff,
+                    PitchGravityFeedforward(pitch_fb.ang) +
+                        PitchAutoAimTorqueFeedforward(g_pitch_aim_ff));
 
         FlushTx();
 
@@ -1169,6 +1220,7 @@ bool thread_init()
     g_pitch_state.omega_lpf.Init(kPitchOmegaLpfHz, kDt);
     // ---- 底盘 yaw 角速度估计低通（前馈用；估计量含编码器速度的量化噪声）----
     g_chassis_yaw_lpf.Init(kYawChassisRateLpfHz, kDt);
+    g_pitch_aim_alpha_lpf.Init(kPitchAimAlphaLpfHz, kDt);
 
     // ---- 上电使能：DM 上电默认失能，先各排一帧 Enable 命令帧 ----
     // 排队即可（本线程是 can3 所有者，第一拍 FlushTx 就发出去）；后面电机没进使能态
