@@ -328,7 +328,7 @@ static constexpr float kYawStickRateGain = kYawStickRateFfGain * kYawSensitivity
 static constexpr float kAimYawOmegaFfGain = 1.0f;
 static constexpr float kAimYawAlphaFfGain = 0.5f;
 static constexpr float kAimPitchOmegaFfGain = 1.0f;
-static constexpr float kAimPitchAlphaFfGain = 0.5f;
+static constexpr float kAimPitchAlphaFfGain = 0.7f;
 
 static constexpr float kPitchAimAlphaLpfHz = 50.0f;
 static constexpr bool  kPitchAimAlphaNotchEnable = true;
